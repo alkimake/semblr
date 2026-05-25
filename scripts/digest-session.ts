@@ -1,13 +1,13 @@
 /**
- * digest-session.ts — Parse a pi session JSONL into turns, embed them via OpenRouter,
+ * digest-session.ts — Parse a pi session JSONL into rounds, embed them via OpenRouter,
  * and build a vector index.
  *
  * Usage:
  *   npx tsx scripts/digest-session.ts <session-file>
  *
  * Output:
- *   .pi/turns/<id>.json    — each turn as a file
- *   .pi/turns/index.csv    — vector index (base64(vector),filepath)
+ *   .pi/rounds/<id>.json    — each round as a file
+ *   .pi/rounds/index.csv    — vector index (base64(vector),filepath)
  */
 
 import * as fs from "node:fs";
@@ -17,13 +17,13 @@ import * as path from "node:path";
 // Types
 // ─────────────────────────────────────────────
 
-interface Turn {
+interface Round {
   id: string;
   userPrompt: string;
   responseSequence: string;
   userTimestamp: number;
   responseEndTimestamp: number;
-  turnIndex: number;
+  turnIndex: number; // serialized — keep name for backward compat
 }
 
 interface SessionEntry {
@@ -45,39 +45,40 @@ interface SessionEntry {
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const EMBEDDING_MODEL = "openai/text-embedding-3-small";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"; // actually embeddings endpoint
-const TURNS_DIR = path.resolve(import.meta.dirname, "..", ".pi", "turns");
-const INDEX_PATH = path.resolve(TURNS_DIR, "index.csv");
+const ROUNDS_DIR = path.resolve(import.meta.dirname, "..", ".pi", "rounds");
+const INDEX_PATH = path.resolve(ROUNDS_DIR, "index.csv");
 
 // ─────────────────────────────────────────────
-// Parse session into turns
+// Parse session into rounds
 // ─────────────────────────────────────────────
 
-function parseSession(filePath: string): Turn[] {
+function parseSession(filePath: string): Round[] {
   const content = fs.readFileSync(filePath, "utf-8");
   const lines = content.trim().split("\n").filter(Boolean);
   const entries: SessionEntry[] = lines.map((l) => JSON.parse(l));
 
-  const turns: Turn[] = [];
+  const rounds: Round[] = [];
   let currentUserMsg: SessionEntry | null = null;
   let responseParts: string[] = [];
-  let turnIndex = 0;
+  let roundIndex = 0;
 
   for (const entry of entries) {
     if (entry.type !== "message" || !entry.message) continue;
     const { role, content } = entry.message;
 
     if (role === "user") {
-      // Save previous turn if exists
+      // Save previous round if exists
       if (currentUserMsg) {
-        turns.push({
+        rounds.push({
           id: currentUserMsg.id,
           userPrompt: extractText(currentUserMsg.message!.content),
           responseSequence: responseParts.join("\n\n").trim(),
           userTimestamp: currentUserMsg.message!.timestamp ?? 0,
           responseEndTimestamp: entry.message?.timestamp ?? 0,
-          turnIndex,
+          turnIndex: roundIndex,
         });
-        turnIndex++;
+        roundIndex++;
+
       }
       currentUserMsg = entry;
       responseParts = [];
@@ -87,19 +88,19 @@ function parseSession(filePath: string): Turn[] {
     }
   }
 
-  // Save last turn
+  // Save last round
   if (currentUserMsg) {
-    turns.push({
+    rounds.push({
       id: currentUserMsg.id,
       userPrompt: extractText(currentUserMsg.message!.content),
       responseSequence: responseParts.join("\n\n").trim(),
       userTimestamp: currentUserMsg.message!.timestamp ?? 0,
       responseEndTimestamp: Date.now(),
-      turnIndex,
+      turnIndex: roundIndex,
     });
   }
 
-  return turns;
+  return rounds;
 }
 
 function extractText(content: Array<{ type: string; text?: string }>): string {
@@ -192,12 +193,12 @@ async function main() {
 
   console.log(`📂 Session: ${sessionFile}`);
   const turns = parseSession(sessionFile);
-  console.log(`📊 Parsed ${turns.length} turns`);
+  console.log(`📊 Parsed ${rounds.length} rounds`);
 
-  // Ensure turns directory
-  fs.mkdirSync(TURNS_DIR, { recursive: true });
+  // Ensure rounds directory
+  fs.mkdirSync(ROUNDS_DIR, { recursive: true });
 
-  // Check existing index to skip already-processed turns
+  // Check existing index to skip already-processed rounds
   const existing = new Set(
     loadIndex().map((e) => path.basename(e.filePath)),
   );
@@ -205,34 +206,34 @@ async function main() {
   let embedded = 0;
   let skipped = 0;
 
-  for (const turn of turns) {
+  for (const round of rounds) {
     const crypto = require("node:crypto");
-    const turnFile = `turn-${crypto.createHash("md5").update(turn.userPrompt + turn.responseSequence).digest("hex")}.json`;
+    const roundFile = `${crypto.createHash("md5").update(round.userPrompt + round.responseSequence).digest("hex")}.json`;
 
-    // Always write the turn file (idempotent)
+    // Always write the round file (idempotent)
     fs.writeFileSync(
-      path.resolve(TURNS_DIR, turnFile),
-      JSON.stringify(turn, null, 2),
+      path.resolve(ROUNDS_DIR, roundFile),
+      JSON.stringify(round, null, 2),
     );
 
-    if (existing.has(turnFile)) {
+    if (existing.has(roundFile)) {
       skipped++;
       continue;
     }
 
     // Embed prompt
-    console.log(`  🔄 Embedding turn ${turn.turnIndex + 1}/${turns.length}...`);
-    const promptVector = await embed(turn.userPrompt);
-    appendToIndex(normalize(promptVector), turnFile + ":prompt");
+    console.log(`  🔄 Embedding round ${round.turnIndex + 1}/${rounds.length}...`);
+    const promptVector = await embed(round.userPrompt);
+    appendToIndex(normalize(promptVector), roundFile + ":prompt");
 
     // Embed response
-    const respVector = await embed(turn.responseSequence.slice(0, 8000)); // conservative token limit
-    appendToIndex(normalize(respVector), turnFile + ":response");
+    const respVector = await embed(round.responseSequence.slice(0, 8000)); // conservative token limit
+    appendToIndex(normalize(respVector), roundFile + ":response");
 
     embedded++;
   }
 
-  console.log(`\n✅ Done. ${embedded} new turns embedded, ${skipped} already in index.`);
+  console.log(`\n✅ Done. ${embedded} new rounds embedded, ${skipped} already in index.`);
   console.log(`   Index: ${INDEX_PATH} (${loadIndex().length} vectors)`);
 }
 
