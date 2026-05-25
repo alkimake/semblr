@@ -12,6 +12,7 @@ import type { ExtensionAPI, ContextEvent } from "@earendil-works/pi-coding-agent
 import { Type } from "@sinclair/typebox";
 import * as fs from "node:fs";
 import * as crypto from "node:crypto";
+import * as os from "node:os";
 import { spawnSync } from "node:child_process";
 
 // ─────────────────────────────────────────────
@@ -92,9 +93,26 @@ function loadIndex(): IndexEntry[] {
   });
 }
 
+interface ToolCallDetail {
+  index: number;
+  name: string;
+  arguments: string;    // JSON string of arguments (abbreviated if >500 chars)
+  result_summary: string; // first 300 chars of result text
+}
+
+interface RoundData {
+  userPrompt: string;
+  responseSequence: string;
+  turnIndex: number;
+  userTimestamp?: number;
+  toolCallCount?: number;
+  toolCallNames?: string[];
+  toolCalls?: ToolCallDetail[];
+}
+
 function readRoundFile(
   filePath: string,
-): { userPrompt: string; responseSequence: string; turnIndex: number; userTimestamp?: number } | null {
+): RoundData | null {
   // filePath may be "xxx.json:prompt" or "xxx.json:response"
   // strip the :prompt/:response suffix to get the actual file
   const actualFile = filePath.replace(/:prompt$|:response$/, "");
@@ -107,6 +125,9 @@ function readRoundFile(
       responseSequence: data.responseSequence ?? "",
       turnIndex: data.turnIndex ?? 0,
       userTimestamp: data.userTimestamp,
+      toolCallCount: data.toolCallCount,
+      toolCallNames: data.toolCallNames,
+      toolCalls: data.toolCalls,
     };
   } catch {
     return null;
@@ -119,6 +140,10 @@ let lastRoundFileName: string | null = null; // tracks the most recent saved rou
 let agentUserPrompt: string | null = null;
 let agentTurnIndex: number | null = null;
 let agentAccumulatedText: string[] = []
+let agentToolCallCount: number = 0;
+let agentToolCallNames: string[] = [];
+let agentToolCalls: ToolCallDetail[] = [];
+let agentPendingToolCallIds: Map<string, ToolCallDetail> = new Map(); // toolCallId → partial detail
 
 // Stash between session_before_compact and session_compact
 let pendingCompactionTurnFiles: string[] | null = null;
@@ -261,12 +286,8 @@ export default function (pi: ExtensionAPI) {
 
       // Group by round file, take best score per round
       interface RoundScore {
-        data: {
-          userPrompt: string;
-          responseSequence: string;
-          turnIndex: number;
-          userTimestamp?: number;
-        };
+        data: RoundData;
+        fileName: string;
         bestScore: number;
       }
       const roundScores = new Map<string, RoundScore>();
@@ -278,6 +299,7 @@ export default function (pi: ExtensionAPI) {
         if (!roundData) continue;
         roundScores.set(roundFile, {
           data: roundData,
+          fileName: roundFile,
           bestScore: entry.similarity,
         });
       }
@@ -314,7 +336,7 @@ export default function (pi: ExtensionAPI) {
       if (lastRoundFileName) {
         const lastData = readRoundFile(lastRoundFileName);
         if (lastData) {
-          addRound({ data: lastData, bestScore: 0 });
+          addRound({ data: lastData, fileName: lastRoundFileName, bestScore: 0 });
           lastRoundContentHash = crypto.createHash("md5")
             .update(lastData.userPrompt + lastData.responseSequence)
             .digest("hex");
@@ -369,14 +391,31 @@ export default function (pi: ExtensionAPI) {
       // the model from mimicking tool calls or phrasing from past rounds.
       const contextMessages: Array<{ role: string; content: Array<{ type: string; text: string }> }> = [];
       for (const round of dedupedRounds) {
+        // Build tool metadata line to distinguish real work from discussion
+        let toolMeta = "";
+        if (round.data.toolCallCount != null && round.data.toolCallCount > 0) {
+          const names = round.data.toolCallNames?.length ? round.data.toolCallNames.join(", ") : "unknown";
+          toolMeta = ` [TOOLS USED: ${round.data.toolCallCount} calls — ${names}]`;
+          // Add tool detail hints if available
+          if (round.data.toolCalls && round.data.toolCalls.length > 0) {
+            const hints = round.data.toolCalls.slice(0, 5).map(tc =>
+              `${tc.index}:${tc.name}`
+            ).join(" ");
+            const more = round.data.toolCalls.length > 5 ? ` ...+${round.data.toolCalls.length - 5} more` : "";
+            toolMeta += `\nUse get_tool_details("${round.fileName}", N) to inspect any call. Indexes: ${hints}${more}`;
+          }
+        } else if (round.data.toolCallCount === 0) {
+          toolMeta = ` [TOOLS USED: 0 — this was discussion only, no tools were executed]`;
+        }
+
         contextMessages.push({
           role: "user",
-          content: [{ type: "text", text: `[HISTORICAL TURN from a past conversation — similarity: ${round.bestScore.toFixed(3)}]
+          content: [{ type: "text", text: `[HISTORICAL ROUND from a past conversation — similarity: ${round.bestScore.toFixed(3)}${toolMeta}]
 User asked: ${round.data.userPrompt}` }],
         });
         contextMessages.push({
           role: "assistant",
-          content: [{ type: "text", text: `[END OF HISTORICAL TURN — this was a past response, not the current one. Stay focused on the user's most recent message above.]
+          content: [{ type: "text", text: `[END OF HISTORICAL ROUND — this was a past response, not the current one. Stay focused on the user's most recent message above.]
 ${round.data.responseSequence}` }],
         });
       }
@@ -386,9 +425,23 @@ ${round.data.responseSequence}` }],
         `🧠 retrieved ${dedupedRounds.length} rounds (${usedTokens} tok) from ${uniqueRounds} indexed`,
       );
 
+      const enrichedSystem = systemMsg
+        ? {
+            ...systemMsg,
+            content: typeof systemMsg.content === "string"
+              ? systemMsg.content + `
+
+[ENVIRONMENT]
+Host: ${os.hostname()}
+CWD: ${process.cwd()}
+Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+/, "")}`
+              : systemMsg.content,
+          }
+        : null;
+
       return {
         messages: [
-          ...(systemMsg ? [systemMsg] : []),
+          ...(enrichedSystem ? [enrichedSystem] : []),
           ...contextMessages,
           ...currentMessages,
         ],
@@ -418,6 +471,9 @@ ${round.data.responseSequence}` }],
     }
     agentTurnIndex = event.turnIndex ?? null;
     agentAccumulatedText = [];
+    agentToolCallCount = 0;
+    agentToolCallNames = [];
+    agentToolCalls = [];
   });
 
   pi.on("message_end", async (event, _ctx) => {
@@ -434,6 +490,39 @@ ${round.data.responseSequence}` }],
         for (const block of content) {
           if (block.type === "text" && block.text) {
             agentAccumulatedText.push(block.text);
+          } else if (block.type === "toolCall") {
+            agentToolCallCount++;
+            const blockRec = block as Record<string, unknown>;
+            const name = blockRec.name as string | undefined;
+            const id = blockRec.id as string | undefined;
+            if (name && !agentToolCallNames.includes(name)) {
+              agentToolCallNames.push(name);
+            }
+            if (id && name) {
+              const detail: ToolCallDetail = {
+                index: agentToolCalls.length,
+                name,
+                arguments: JSON.stringify(blockRec.arguments ?? {}),
+                result_summary: "",
+              };
+              agentToolCalls.push(detail);
+            }
+          }
+        }
+      }
+    } else if (msg.role === "toolResult") {
+      // Pair tool results with their calls
+      const toolCallId = msg.toolCallId as string | undefined;
+      if (toolCallId) {
+        // Find the matching ToolCallDetail by matching the last call without a result
+        // (pi sessions don't expose the toolCallId -> toolCall mapping directly, so
+        // we match sequentially — results arrive in order)
+        for (let i = agentToolCalls.length - 1; i >= 0; i--) {
+          if (agentToolCalls[i].result_summary === "") {
+            const resultContent = msg.content as Array<{ type: string; text?: string }> | undefined;
+            const resultText = resultContent ? extractText(resultContent) : "";
+            agentToolCalls[i].result_summary = resultText.slice(0, 300);
+            break;
           }
         }
       }
@@ -504,6 +593,9 @@ ${round.data.responseSequence}` }],
       responseSequence: responseText,
       turnIndex: agentTurnIndex ?? 0,
       userTimestamp: Date.now(),
+      toolCallCount: agentToolCallCount,
+      toolCallNames: agentToolCallNames,
+      toolCalls: agentToolCalls,
     };
 
     try {
@@ -724,7 +816,7 @@ ${round.data.responseSequence}` }],
           .sort((a, b) => b.similarity - a.similarity);
 
         // Group by round file, take best score per round
-        const roundScores = new Map<string, { data: { userPrompt: string; responseSequence: string; turnIndex: number }; bestScore: number }>();
+        const roundScores = new Map<string, { data: RoundData; bestScore: number }>();
         for (const entry of scored) {
           const roundFile = entry.filePath.replace(/:prompt$|:response$/, "");
           if (!roundFile.endsWith(".json")) continue;
@@ -752,7 +844,10 @@ ${round.data.responseSequence}` }],
           if (round.bestScore < MIN_SIMILARITY) break;
           if (count >= 5) break;
           count++;
-          lines.push(`--- Round (score: ${round.bestScore.toFixed(3)}) ---`);
+          const toolStr = round.data.toolCallCount != null && round.data.toolCallCount > 0
+            ? ` | ${round.data.toolCallCount} tools (${(round.data.toolCallNames ?? []).join(", ")})`
+            : (round.data.toolCallCount === 0 ? " | 0 tools (discussion only)" : "");
+          lines.push(`--- Round (score: ${round.bestScore.toFixed(3)}${toolStr}) ---`);
           lines.push(`User: ${round.data.userPrompt.slice(0, 500)}`);
           lines.push(`Assistant: ${round.data.responseSequence.slice(0, 1000)}`);
           lines.push("");
@@ -768,6 +863,72 @@ ${round.data.responseSequence}` }],
         return {
           content: [{ type: "text", text: `Found ${count} relevant rounds:\n\n${lines.join("\n")}` }],
           details: { matched: count, topScore: sorted[0].bestScore },
+        };
+      },
+    });
+
+    // Register get_tool_details — retrieve full tool call details from a round file
+    pi.registerTool({
+      name: "get_tool_details",
+      label: "Get Tool Details",
+      description: "Retrieve the full arguments and result of a specific tool call from a past conversation round. When you see historical rounds injected into context with TOOLS USED markers, you can call this tool to inspect what a specific tool did — its full arguments and the complete output (not just the preview stored in the round file).\n\nParameters:\n- round: the round filename (e.g., 'abc123.json')\n- index: the 0-based index of the tool call within that round's toolCalls array",
+      promptSnippet: "Get details of a specific tool call from a past round",
+      parameters: Type.Object({
+        round: Type.String({ description: "The round filename to look up (e.g., 'abc123def456.json')" }),
+        index: Type.Number({ description: "The 0-based index of the tool call within the round" }),
+      }),
+      async execute(toolCallId, params, signal, onUpdate, ctx2) {
+        const p = params as { round: string; index: number };
+
+        const fullPath = `${ROUNDS_DIR}/${p.round}`;
+        if (!fs.existsSync(fullPath)) {
+          return {
+            content: [{ type: "text", text: `Round file not found: ${p.round}` }],
+            details: {},
+          };
+        }
+
+        let roundData: RoundData;
+        try {
+          roundData = JSON.parse(fs.readFileSync(fullPath, "utf-8"));
+        } catch {
+          return {
+            content: [{ type: "text", text: `Failed to parse round file: ${p.round}` }],
+            details: {},
+          };
+        }
+
+        if (!roundData.toolCalls || roundData.toolCalls.length === 0) {
+          return {
+            content: [{ type: "text", text: `This round has no tool calls stored. It may have been indexed before tool call metadata was added. Consider re-indexing.` }],
+            details: {},
+          };
+        }
+
+        if (p.index < 0 || p.index >= roundData.toolCalls.length) {
+          return {
+            content: [{ type: "text", text: `Invalid index ${p.index}. This round has ${roundData.toolCalls.length} tool calls (indices 0–${roundData.toolCalls.length - 1}).` }],
+            details: {},
+          };
+        }
+
+        const tc = roundData.toolCalls[p.index];
+
+        // Parse arguments back to object for display
+        let argsParsed: unknown = tc.arguments;
+        try {
+          argsParsed = JSON.parse(tc.arguments);
+        } catch { /* keep as string */ }
+
+        return {
+          content: [{
+            type: "text",
+            text: `Tool call #${tc.index} in round ${p.round}\n` +
+              `  Name: ${tc.name}\n` +
+              `  Arguments: ${JSON.stringify(argsParsed, null, 2)}\n` +
+              `  Result (preview): ${tc.result_summary || "(empty)"}`,
+          }],
+          details: { name: tc.name, arguments: tc.arguments, result_preview: tc.result_summary },
         };
       },
     });
