@@ -32,6 +32,13 @@ const MAX_RESPONSE_CHARS = 8000;
 // Types
 // ─────────────────────────────────────────────
 
+interface ToolCallDetail {
+  index: number;
+  name: string;
+  arguments: string;
+  result_summary: string;
+}
+
 interface Round {
   id: string;
   userPrompt: string;
@@ -40,6 +47,9 @@ interface Round {
   responseEndTimestamp: number;
   turnIndex: number; // serialized — keep name for backward compat
   sessionLabel: string; // human-readable label for this session file
+  toolCallCount: number;
+  toolCallNames: string[];
+  toolCalls: ToolCallDetail[];
 }
 
 // ─────────────────────────────────────────────
@@ -54,6 +64,9 @@ function parseSessionFile(filePath: string, sessionLabel: string): Round[] {
   const rounds: Round[] = [];
   let currentUserMsg: Record<string, unknown> | null = null;
   let responseParts: string[] = [];
+  let toolNames: string[] = [];
+  let toolCallCount = 0;
+  let toolCalls: ToolCallDetail[] = [];
   let roundIndex = 0;
 
   for (const entry of entries) {
@@ -80,14 +93,48 @@ function parseSessionFile(filePath: string, sessionLabel: string): Round[] {
           responseEndTimestamp: timestamp ?? Date.now(),
           turnIndex: roundIndex,
           sessionLabel,
+          toolCallCount,
+          toolCallNames: [...new Set(toolNames)],
+          toolCalls,
         });
         roundIndex++;
       }
       currentUserMsg = entry;
       responseParts = [];
+      toolNames = [];
+      toolCallCount = 0;
+      toolCalls = [];
     } else if (role === "assistant" && currentUserMsg && content) {
+      // Count and capture tool calls embedded in assistant content blocks
+      for (const block of content) {
+        if (block.type === "toolCall") {
+          toolCallCount++;
+          const blockRec = block as Record<string, unknown>;
+          const name = blockRec.name as string | undefined;
+          if (name) toolNames.push(name);
+          toolCalls.push({
+            index: toolCalls.length,
+            name: name ?? "unknown",
+            arguments: JSON.stringify(blockRec.arguments ?? {}),
+            result_summary: "",
+          });
+        }
+      }
       const text = extractText(content);
       if (text) responseParts.push(text);
+    } else if (role === "toolResult" && currentUserMsg) {
+      // Count tool results and pair with pending tool calls (sequential match)
+      const toolName = msg.toolName as string | undefined;
+      if (toolName) toolNames.push(toolName);
+      // Pair with the most recent tool call that lacks a result
+      for (let i = toolCalls.length - 1; i >= 0; i--) {
+        if (toolCalls[i].result_summary === "") {
+          const resultContent = msg.content as Array<{ type: string; text?: string }> | undefined;
+          const resultText = resultContent ? extractText(resultContent) : "";
+          toolCalls[i].result_summary = resultText.slice(0, 300);
+          break;
+        }
+      }
     }
   }
 
@@ -108,6 +155,9 @@ function parseSessionFile(filePath: string, sessionLabel: string): Round[] {
       responseEndTimestamp: Date.now(),
       turnIndex: roundIndex,
       sessionLabel,
+      toolCallCount,
+      toolCallNames: [...new Set(toolNames)],
+      toolCalls,
     });
   }
 

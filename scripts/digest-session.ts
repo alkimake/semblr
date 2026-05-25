@@ -17,6 +17,13 @@ import * as path from "node:path";
 // Types
 // ─────────────────────────────────────────────
 
+interface ToolCallDetail {
+  index: number;
+  name: string;
+  arguments: string;
+  result_summary: string;
+}
+
 interface Round {
   id: string;
   userPrompt: string;
@@ -24,6 +31,9 @@ interface Round {
   userTimestamp: number;
   responseEndTimestamp: number;
   turnIndex: number; // serialized — keep name for backward compat
+  toolCallCount: number;
+  toolCallNames: string[];
+  toolCalls: ToolCallDetail[];
 }
 
 interface SessionEntry {
@@ -60,6 +70,9 @@ function parseSession(filePath: string): Round[] {
   const rounds: Round[] = [];
   let currentUserMsg: SessionEntry | null = null;
   let responseParts: string[] = [];
+  let toolNames: string[] = [];
+  let toolCallCount = 0;
+  let toolCalls: ToolCallDetail[] = [];
   let roundIndex = 0;
 
   for (const entry of entries) {
@@ -76,15 +89,48 @@ function parseSession(filePath: string): Round[] {
           userTimestamp: currentUserMsg.message!.timestamp ?? 0,
           responseEndTimestamp: entry.message?.timestamp ?? 0,
           turnIndex: roundIndex,
+          toolCallCount,
+          toolCallNames: [...new Set(toolNames)],
+          toolCalls,
         });
         roundIndex++;
 
       }
       currentUserMsg = entry;
       responseParts = [];
+      toolNames = [];
+      toolCallCount = 0;
+      toolCalls = [];
     } else if (role === "assistant" && currentUserMsg) {
+      // Count and capture tool calls embedded in assistant content blocks
+      for (const block of content) {
+        if (block.type === "toolCall") {
+          toolCallCount++;
+          const blockRec = block as Record<string, unknown>;
+          const name = blockRec.name as string | undefined;
+          if (name) toolNames.push(name);
+          toolCalls.push({
+            index: toolCalls.length,
+            name: name ?? "unknown",
+            arguments: JSON.stringify(blockRec.arguments ?? {}),
+            result_summary: "",
+          });
+        }
+      }
       const text = extractText(content);
       if (text) responseParts.push(text);
+    } else if (role === "toolResult" && currentUserMsg) {
+      const toolName = entry.message.toolName as string | undefined;
+      if (toolName) toolNames.push(toolName);
+      // Pair with the most recent tool call that lacks a result
+      for (let i = toolCalls.length - 1; i >= 0; i--) {
+        if (toolCalls[i].result_summary === "") {
+          const resultContent = entry.message.content;
+          const resultText = resultContent ? extractText(resultContent) : "";
+          toolCalls[i].result_summary = resultText.slice(0, 300);
+          break;
+        }
+      }
     }
   }
 
@@ -97,6 +143,9 @@ function parseSession(filePath: string): Round[] {
       userTimestamp: currentUserMsg.message!.timestamp ?? 0,
       responseEndTimestamp: Date.now(),
       turnIndex: roundIndex,
+      toolCallCount,
+      toolCallNames: [...new Set(toolNames)],
+      toolCalls,
     });
   }
 
