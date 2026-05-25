@@ -338,10 +338,15 @@ export default function (pi: ExtensionAPI) {
       }
 
       // 2. Always add the last turn (if not already there)
+      // Content hash used later to move it to last position after dedup.
+      let lastTurnContentHash: string | null = null;
       if (lastTurnFileName) {
         const lastData = readTurnFile(lastTurnFileName);
         if (lastData) {
           addTurn({ data: lastData, bestScore: 0 });
+          lastTurnContentHash = crypto.createHash("md5")
+            .update(lastData.userPrompt + lastData.responseSequence)
+            .digest("hex");
         }
       }
 
@@ -371,6 +376,20 @@ export default function (pi: ExtensionAPI) {
         if (seenHashes.has(hash)) continue;
         seenHashes.add(hash);
         dedupedTurns.push(turn);
+      }
+
+      // Post-sort: ensure last turn is always the LAST element in the injected context.
+      // This bridges the referential gap — the model sees the preceding turn's response
+      // immediately before the current prompt, making "these", "it", "that" resolvable.
+      if (lastTurnContentHash) {
+        const lastIdx = dedupedTurns.findIndex(t => {
+          const h = crypto.createHash("md5").update(t.data.userPrompt + t.data.responseSequence).digest("hex");
+          return h === lastTurnContentHash;
+        });
+        if (lastIdx !== -1 && lastIdx !== dedupedTurns.length - 1) {
+          const [lastTurn] = dedupedTurns.splice(lastIdx, 1);
+          dedupedTurns.push(lastTurn);
+        }
       }
 
       // Rebuild contextMessages from deduped turns
@@ -547,24 +566,49 @@ ${turn.data.responseSequence}` }],
   //   - when retrieved, the LLM can drill down via search_interactions(turns=[])
   //
   // In session_before_compact we identify which turn files are being compacted
-  // by matching userMessageIds. In session_compact we save+embed the summary.
+  // by matching user message content via MD5 hash. This works regardless of
+  // whether the turn was saved by our turn_end handler or by digest-all.ts.
   pi.on("session_before_compact", async (event, _ctx) => {
     const { preparation } = event;
-    // Extract user message IDs from messages being compacted
-    const userMsgIds: string[] = [];
+
+    // Build a lookup of user prompt MD5 hash → turnFileName from ALL turn files
+    // Matches by message content, not by message ID — so it works for turns
+    // created by digest-all.ts and by the turn_end handler alike.
+    // Build a lookup of user prompt MD5 hash → turnFileName from ALL turn files
+    const promptHashToFile = new Map<string, string>();
+    try {
+      const files = fs.readdirSync(TURNS_DIR).filter(f => f.startsWith("turn-") && f.endsWith(".json"));
+      for (const file of files) {
+        const raw = fs.readFileSync(TURNS_DIR + "/" + file, "utf-8");
+        const data = JSON.parse(raw);
+        if (data.userPrompt && data.userPrompt !== "compaction-summary") {
+          const hash = crypto.createHash("md5").update(data.userPrompt).digest("hex");
+          promptHashToFile.set(hash, file);
+        }
+      }
+    } catch { /* ignore read errors */ }
+
+    // Extract user message content from messages being compacted,
+    // hash it, and look up the matching turn file.
+    // IMPORTANT: use extractText() here (same as digest-all.ts) so the hash
+    // matches what was stored in the turn file's userPrompt field.
+    const matched = new Set<string>();
     for (const msg of preparation.messagesToSummarize) {
-      if (msg.role === "user" && (msg as Record<string, unknown>).id) {
-        userMsgIds.push((msg as Record<string, unknown>).id as string);
+      if (msg.role !== "user") continue;
+      let text = "";
+      const content = msg.content;
+      if (typeof content === "string") {
+        text = content;
+      } else if (Array.isArray(content)) {
+        text = extractText(content as Array<{ type: string; text?: string }>);
       }
+      if (!text) continue;
+      const hash = crypto.createHash("md5").update(text).digest("hex");
+      const file = promptHashToFile.get(hash);
+      if (file) matched.add(file);
     }
-    // Look up our turn files that match these message IDs
-    const matched: string[] = [];
-    for (const entry of compactionChain) {
-      if (userMsgIds.includes(entry.userMessageId)) {
-        matched.push(entry.turnFileName);
-      }
-    }
-    pendingCompactionTurnFiles = matched;
+
+    pendingCompactionTurnFiles = Array.from(matched);
     // Don't cancel — let compaction proceed normally
   });
 
