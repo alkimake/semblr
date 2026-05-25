@@ -1,7 +1,7 @@
 /**
  * digest-all.ts — Bulk-embed all pi session JSONL files into the contexter index.
  *
- * Iterates every session in ~/.pi/agent/sessions/, skips already-indexed turns,
+ * Iterates every session in ~/.pi/agent/sessions/, skips already-indexed rounds,
  * parallelizes embedding via OpenRouter.
  *
  * Usage:
@@ -19,9 +19,8 @@ import * as os from "node:os";
 // ─────────────────────────────────────────────
 
 const SESSIONS_DIR = path.resolve(os.homedir(), ".pi", "agent", "sessions");
-const CONVERTER_DIR = path.resolve(import.meta.dirname, "..", ".pi", "turns");
-const TURNS_DIR = CONVERTER_DIR;
-const INDEX_PATH = path.resolve(TURNS_DIR, "index.csv");
+const ROUNDS_DIR = path.resolve(import.meta.dirname, "..", ".pi", "rounds");
+const INDEX_PATH = path.resolve(ROUNDS_DIR, "index.csv");
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const EMBEDDING_MODEL = "openai/text-embedding-3-small";
@@ -33,29 +32,29 @@ const MAX_RESPONSE_CHARS = 8000;
 // Types
 // ─────────────────────────────────────────────
 
-interface Turn {
+interface Round {
   id: string;
   userPrompt: string;
   responseSequence: string;
   userTimestamp: number;
   responseEndTimestamp: number;
-  turnIndex: number;
+  turnIndex: number; // serialized — keep name for backward compat
   sessionLabel: string; // human-readable label for this session file
 }
 
 // ─────────────────────────────────────────────
-// Parse a single JSONL file into turns
+// Parse a single JSONL file into rounds
 // ─────────────────────────────────────────────
 
-function parseSessionFile(filePath: string, sessionLabel: string): Turn[] {
+function parseSessionFile(filePath: string, sessionLabel: string): Round[] {
   const content = fs.readFileSync(filePath, "utf-8");
   const lines = content.trim().split("\n").filter(Boolean);
   const entries: Array<Record<string, unknown>> = lines.map((l) => JSON.parse(l));
 
-  const turns: Turn[] = [];
+  const rounds: Round[] = [];
   let currentUserMsg: Record<string, unknown> | null = null;
   let responseParts: string[] = [];
-  let turnIndex = 0;
+  let roundIndex = 0;
 
   for (const entry of entries) {
     if (entry.type !== "message") continue;
@@ -67,9 +66,9 @@ function parseSessionFile(filePath: string, sessionLabel: string): Turn[] {
     const timestamp = msg.timestamp as number | undefined;
 
     if (role === "user") {
-      // Save previous turn if exists
+      // Save previous round if exists
       if (currentUserMsg) {
-        turns.push({
+        rounds.push({
           id: currentUserMsg.id as string,
           userPrompt: extractText(
             (currentUserMsg.message as Record<string, unknown>)?.content as
@@ -79,10 +78,10 @@ function parseSessionFile(filePath: string, sessionLabel: string): Turn[] {
           responseSequence: responseParts.join("\n\n").trim(),
           userTimestamp: (currentUserMsg.message as Record<string, unknown>)?.timestamp as number ?? 0,
           responseEndTimestamp: timestamp ?? Date.now(),
-          turnIndex,
+          turnIndex: roundIndex,
           sessionLabel,
         });
-        turnIndex++;
+        roundIndex++;
       }
       currentUserMsg = entry;
       responseParts = [];
@@ -92,12 +91,12 @@ function parseSessionFile(filePath: string, sessionLabel: string): Turn[] {
     }
   }
 
-  // Save last turn — only if it has a non-empty response or we have multiple turns.
-  // Skip turns whose response is trivially short (< 20 chars) — these are usually
+  // Save last round — only if it has a non-empty response or we have multiple rounds.
+  // Skip rounds whose response is trivially short (< 20 chars) — these are usually
   // session files that ended mid-stream (truncated assistant response).
   const finalResponse = responseParts.join("\n\n").trim();
-  if (currentUserMsg && (finalResponse.length >= 20 || turnIndex > 0)) {
-    turns.push({
+  if (currentUserMsg && (finalResponse.length >= 20 || roundIndex > 0)) {
+    rounds.push({
       id: currentUserMsg.id as string,
       userPrompt: extractText(
         (currentUserMsg.message as Record<string, unknown>)?.content as
@@ -107,12 +106,12 @@ function parseSessionFile(filePath: string, sessionLabel: string): Turn[] {
       responseSequence: finalResponse,
       userTimestamp: (currentUserMsg.message as Record<string, unknown>)?.timestamp as number ?? 0,
       responseEndTimestamp: Date.now(),
-      turnIndex,
+      turnIndex: roundIndex,
       sessionLabel,
     });
   }
 
-  return turns;
+  return rounds;
 }
 
 function extractText(content?: Array<{ type: string; text?: string }>): string {
@@ -223,29 +222,29 @@ async function main() {
 
   console.log(`📂 Found ${jsonlFiles.length} session files across ${sessionDirs.length} directories\n`);
 
-  // Ensure the .pi/turns dir
-  fs.mkdirSync(TURNS_DIR, { recursive: true });
+  // Ensure the .pi/rounds dir
+  fs.mkdirSync(ROUNDS_DIR, { recursive: true });
 
   // Load existing index dedup set
-  const existingTurns = loadIndexFilePaths();
-  console.log(`📊 Already indexed: ${existingTurns.size} turns\n`);
+  const existingRounds = loadIndexFilePaths();
+  console.log(`📊 Already indexed: ${existingRounds.size} rounds\n`);
 
-  // Parse all sessions into a flat list of turns (skipping already-indexed)
-  const allTurns: Turn[] = [];
+  // Parse all sessions into a flat list of rounds (skipping already-indexed)
+  const allRounds: Round[] = [];
   let skippedTotal = 0;
 
   for (const { filePath, label } of jsonlFiles) {
-    const turns = parseSessionFile(filePath, label);
-    const newTurns = turns.filter((t) => {
-      const key = `turn-${require("node:crypto").createHash("md5").update(t.userPrompt + t.responseSequence).digest("hex")}.json`;
-      return !existingTurns.has(key);
+    const rounds = parseSessionFile(filePath, label);
+    const newRounds = rounds.filter((t) => {
+      const key = `${require("node:crypto").createHash("md5").update(t.userPrompt + t.responseSequence).digest("hex")}.json`;
+      return !existingRounds.has(key);
     });
-    skippedTotal += turns.length - newTurns.length;
-    allTurns.push(...newTurns);
+    skippedTotal += rounds.length - newRounds.length;
+    allRounds.push(...newRounds);
   }
 
-  const totalNew = allTurns.length;
-  console.log(`📊 New turns to embed: ${totalNew} (${skippedTotal} already indexed)\n`);
+  const totalNew = allRounds.length;
+  console.log(`📊 New rounds to embed: ${totalNew} (${skippedTotal} already indexed)\n`);
 
   if (totalNew === 0) {
     console.log("✨ Nothing to do — all sessions already indexed!");
@@ -256,49 +255,49 @@ async function main() {
   let completed = 0;
   let errors = 0;
 
-  async function processTurn(turn: Turn): Promise<void> {
+  async function processRound(round: Round): Promise<void> {
     const crypto = require("node:crypto");
-    const turnFile = `turn-${crypto.createHash("md5").update(turn.userPrompt + turn.responseSequence).digest("hex")}.json`;
-    const turnId = `${turn.sessionLabel}/${turnFile}`;
+    const roundFile = `${crypto.createHash("md5").update(round.userPrompt + round.responseSequence).digest("hex")}.json`;
+    const roundId = `${round.sessionLabel}/${roundFile}`;
 
-    // Write turn file (always)
+    // Write round file (always)
     fs.writeFileSync(
-      path.resolve(TURNS_DIR, turnFile),
-      JSON.stringify(turn, null, 2),
+      path.resolve(ROUNDS_DIR, roundFile),
+      JSON.stringify(round, null, 2),
     );
 
     try {
-      const promptVector = await embed(turn.userPrompt);
-      appendToIndex(normalize(promptVector), `${turnFile}:prompt`);
+      const promptVector = await embed(round.userPrompt);
+      appendToIndex(normalize(promptVector), `${roundFile}:prompt`);
 
-      const respText = turn.responseSequence.slice(0, MAX_RESPONSE_CHARS);
+      const respText = round.responseSequence.slice(0, MAX_RESPONSE_CHARS);
       if (respText) {
         const respVector = await embed(respText);
-        appendToIndex(normalize(respVector), `${turnFile}:response`);
+        appendToIndex(normalize(respVector), `${roundFile}:response`);
       }
 
       completed++;
       const pct = ((completed / totalNew) * 100).toFixed(1);
       process.stderr.write(
-        `  ✅ [${completed}/${totalNew} ${pct}%] ${turnId}\n`,
+        `  ✅ [${completed}/${totalNew} ${pct}%] ${roundId}\n`,
       );
     } catch (err) {
       errors++;
-      process.stderr.write(`  ❌ [ERROR] ${turnId}: ${(err as Error).message}\n`);
+      process.stderr.write(`  ❌ [ERROR] ${roundId}: ${(err as Error).message}\n`);
     }
   }
 
   // Run with concurrency limit
   async function runQueue(): Promise<void> {
-    const queue = [...allTurns];
+    const queue = [...allRounds];
     const workers: Promise<void>[] = [];
 
     for (let i = 0; i < CONCURRENCY; i++) {
       workers.push(
         (async () => {
           while (queue.length > 0) {
-            const turn = queue.shift()!;
-            await processTurn(turn);
+            const round = queue.shift()!;
+            await processRound(round);
           }
         })(),
       );
@@ -315,9 +314,9 @@ async function main() {
     ? fs.readFileSync(INDEX_PATH, "utf-8").trim().split("\n").filter(Boolean).length
     : 0;
 
-  console.log(`\n✅ Done in ${elapsed}s. ${completed} turns embedded, ${errors} errors.`);
+  console.log(`\n✅ Done in ${elapsed}s. ${completed} rounds embedded, ${errors} errors.`);
   console.log(`   Index: ${finalCount} vectors at ${INDEX_PATH}`);
-  console.log(`   Turns: ${fs.readdirSync(TURNS_DIR).filter((f) => f.startsWith("turn-")).length} files`);
+  console.log(`   Rounds: ${fs.readdirSync(ROUNDS_DIR).filter((f) => f.endsWith(".json") && !f.startsWith("index")).length} files`);
 }
 
 main().catch((err) => {

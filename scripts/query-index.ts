@@ -1,21 +1,21 @@
 /**
- * query-index.ts — Embed a prompt, query the vector index, show which turns match.
+ * query-index.ts — Embed a prompt, query the vector index, show which rounds match.
  *
  * Usage:
  *   npx tsx scripts/query-index.ts "<your prompt>"
  *
  * Options:
  *   --top N     Show top N results (default: 10)
- *   --budget N  Show as many turns as fit in N tokens (default: no limit)
- *   --show      Also print the turn content
- *   --chrono    Order selected turns by timestamp (chronological) instead of relevance
+ *   --budget N  Show as many rounds as fit in N tokens (default: no limit)
+ *   --show      Also print the round content
+ *   --chrono    Order selected rounds by timestamp (chronological) instead of relevance
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-const TURNS_DIR = path.resolve(import.meta.dirname, "..", ".pi", "turns");
-const INDEX_PATH = path.resolve(TURNS_DIR, "index.csv");
+const ROUNDS_DIR = path.resolve(import.meta.dirname, "..", ".pi", "rounds");
+const INDEX_PATH = path.resolve(ROUNDS_DIR, "index.csv");
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const EMBEDDING_MODEL = "openai/text-embedding-3-small";
@@ -86,8 +86,8 @@ interface Turn {
   turnIndex: number;
 }
 
-function readTurn(filePath: string): Turn | null {
-  const fullPath = path.resolve(TURNS_DIR, filePath.replace(/:prompt$|:response$/, ""));
+function readRound(filePath: string): Round | null {
+  const fullPath = path.resolve(ROUNDS_DIR, filePath.replace(/:prompt$|:response$/, ""));
   try {
     return JSON.parse(fs.readFileSync(fullPath, "utf-8"));
   } catch {
@@ -157,26 +157,26 @@ async function main() {
     }))
     .sort((a, b) => b.similarity - a.similarity);
 
-  console.log(`  Scored ${index.length} vectors (${Math.ceil(index.length / 2)} turns)\n`);
+  console.log(`  Scored ${index.length} vectors (${Math.ceil(index.length / 2)} rounds)\n`);
 
-  // Group by turn (prompt + response vectors)
-  const turnScores = new Map<number, { turn: Turn; promptSim: number; respSim: number; sources: string[] }>();
+  // Group by round (prompt + response vectors)
+  const roundScores = new Map<number, { round: Round; promptSim: number; respSim: number; sources: string[] }>();
 
   for (const entry of scored) {
-    const turnFile = entry.filePath.replace(/:prompt$|:response$/, "");
-    const turn = readTurn(turnFile);
-    if (!turn) continue;
+    const roundFile = entry.filePath.replace(/:prompt$|:response$/, "");
+    const round = readRound(roundFile);
+    if (!round) continue;
 
-    if (!turnScores.has(turn.turnIndex)) {
-      turnScores.set(turn.turnIndex, {
-        turn,
+    if (!roundScores.has(round.turnIndex)) {
+      roundScores.set(round.turnIndex, {
+        round,
         promptSim: 0,
         respSim: 0,
         sources: [],
       });
     }
 
-    const data = turnScores.get(turn.turnIndex)!;
+    const data = roundScores.get(round.turnIndex)!;
     if (entry.filePath.endsWith(":prompt")) {
       data.promptSim = entry.similarity;
       data.sources.push(`prompt(sim=${entry.similarity.toFixed(4)})`);
@@ -187,7 +187,7 @@ async function main() {
   }
 
   // Sort by best score (max of prompt or response sim)
-  const ranked = Array.from(turnScores.values())
+  const ranked = Array.from(roundScores.values())
     .map((d) => ({
       ...d,
       bestScore: Math.max(d.promptSim, d.respSim),
@@ -205,39 +205,38 @@ async function main() {
     const available = budget - systemTokens - currentPromptTokens - reserveTokens;
 
     for (const r of ranked) {
-      const turnTokens = estimateTokens(r.turn.userPrompt + r.turn.responseSequence);
-      if (usedTokens + turnTokens <= available) {
+      const roundTokens = estimateTokens(r.round.userPrompt + r.round.responseSequence);
+      if (usedTokens + roundTokens <= available) {
         selected.push(r);
-        usedTokens += turnTokens;
+        usedTokens += roundTokens;
       }
     }
 
-    console.log(`📏 Budget: ${budget} tokens, available for turns: ~${available}, used: ${usedTokens}\n`);
+    console.log(`📏 Budget: ${budget} tokens, available for rounds: ~${available}, used: ${usedTokens}\n`);
   } else {
     selected = ranked.slice(0, topN);
   }
 
   // Display results
-  console.log(`📋 Selected ${selected.length} turns:\n`);
+  console.log(`📋 Selected ${selected.length} rounds:\n`);
 
   for (let i = 0; i < selected.length; i++) {
-    const { turn, bestScore, avgScore, promptSim, respSim, sources } = selected[i];
-    console.log(`  #${i + 1} | turn ${turn.turnIndex} | best=${bestScore.toFixed(4)} avg=${avgScore.toFixed(4)}`);
-    console.log(`      prompt: ${turn.userPrompt.slice(0, 100)}${turn.userPrompt.length > 100 ? "..." : ""}`);
+    const { round, bestScore, avgScore, promptSim, respSim, sources } = selected[i];
+    console.log(`  #${i + 1} | round ${round.turnIndex} | best=${bestScore.toFixed(4)} avg=${avgScore.toFixed(4)}`);
+    console.log(`      prompt: ${round.userPrompt.slice(0, 100)}${round.userPrompt.length > 100 ? "..." : ""}`);
     console.log(`      sources: ${sources.join(", ")}`);
 
     if (showContent) {
-      console.log(`      response: ${turn.responseSequence.slice(0, 200)}${turn.responseSequence.length > 200 ? "..." : ""}`);
+      console.log(`      response: ${round.responseSequence.slice(0, 200)}${round.responseSequence.length > 200 ? "..." : ""}`);
     }
     console.log();
   }
 
   // Order selected by timestamp for narrative coherence
   if (chrono) {
-    selected.sort((a, b) => a.turn.turnIndex - b.turn.turnIndex);
+    selected.sort((a, b) => a.round.turnIndex - b.round.turnIndex);
     console.log(`📅 Ordered by timestamp (chronological)`);
-    console.log(`    Turn range: ${selected[0].turn.turnIndex} → ${selected[selected.length - 1].turn.turnIndex}
-`);
+    console.log(`    Round range: ${selected[0].round.turnIndex} → ${selected[selected.length - 1].round.turnIndex}\n`);
   }
 
   // Summary stats
@@ -245,7 +244,7 @@ async function main() {
   const medianScore = ranked.length > 0
     ? ranked[Math.floor(ranked.length / 2)].bestScore
     : 0;
-  console.log(`📊 Score distribution across all ${ranked.length} turns:`);
+  console.log(`📊 Score distribution across all ${ranked.length} rounds:`);
   console.log(`    Best:  ${ranked[0]?.bestScore.toFixed(4) ?? "N/A"}`);
   console.log(`    Top 5: ${ranked.slice(0, 5).map(r => r.bestScore.toFixed(4)).join(", ")}`);
   console.log(`    Median: ${medianScore.toFixed(4)}`);
