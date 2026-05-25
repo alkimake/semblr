@@ -1,0 +1,8 @@
+# Contexter outputs — turn files and vector index
+.pi/turns/
+
+# pi session data (auto-generated)
+.pi/agent/sessions/
+
+# Dependencies
+node_modules/
