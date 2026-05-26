@@ -220,17 +220,9 @@ function loadIndex(): Array<{ vector: number[]; filePath: string }> {
   if (!fs.existsSync(INDEX_PATH)) return [];
   const lines = fs.readFileSync(INDEX_PATH, "utf-8").trim().split("\n").filter(Boolean);
   return lines.map((line) => {
-    const parts = line.split(",");
-    // Detect format: new format has filepath:type as first field followed by raw floats;
-    // old format is base64url-encoded JSON array followed by filepath.
-    if (parts[0].endsWith(":prompt") || parts[0].endsWith(":response")) {
-      // New format: filepath,float0,float1,...,float1535
-      const filePath = parts[0];
-      const vector = parts.slice(1).map(Number);
-      return { vector, filePath };
-    }
-    // Old format: base64url,filepath
-    const [b64, filePath] = parts;
+    const comma = line.indexOf(",");
+    const b64 = line.slice(0, comma);
+    const filePath = line.slice(comma + 1);
     const vector = JSON.parse(Buffer.from(b64, "base64url").toString("utf-8"));
     return { vector, filePath };
   });
