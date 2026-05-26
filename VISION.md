@@ -14,45 +14,68 @@ Every new session is tabula rasa. Prior work, decisions, dead ends — all lost.
 ### 2. Context Decay
 Within a session, as context grows past the window, summarization compresses it. What survives is a rough sketch, not the details.
 
-**Solution:** Dynamic context assembly from the round repository. Each round gets a fixed budget. Always the most relevant rounds, never lossy summarization.
+**Solution:** Dynamic context assembly from the round repository. Each round gets a fixed budget. Always the most relevant rounds, never lossy summarization. Additionally, compaction summaries are indexed as rounds with references to the original turns, turning compaction from data-loss into index compression.
+
+
 
 ## Architecture
 
 ### Round Repository
-- Each round is saved as an individual file
+- Each round is saved as an individual file under a `rounds/<hash>.json` directory
 - A "round" = one user message → full model response sequence (thinking, tool calls, tool results, final answer, etc.)
 - Files are append-only, never modified after creation
+- Deduplication by MD5 content hash
 
 ### Embedding Index
 - Each round gets two embeddings: prompt vector + response vector
-- Stored as an append-only mapping: `vector → filepath`
-- Future: more embedding strategies for different retrieval needs
+- Stored as an append-only CSV: `base64url(vector_json),<filepath>:prompt|:response`
+- Embedding model: `openai/text-embedding-3-small` via OpenRouter API
+- Bulk indexing scripts in `scripts/` for historical sessions
 
 ### Context Assembly (on each prompt)
 1. Embed the incoming user prompt
-2. Compute numpy distance against all stored vectors
-3. Sort by distance (ascending — closest first)
-4. Pull in rounds until the token budget is reached
-5. Construct context: system prompt + retrieved rounds + current prompt
-6. Send to the model
+2. Compute cosine similarity against all stored vectors
+3. Sort by distance (descending — closest first)
+4. Pull in rounds above a dynamic similarity threshold until the token budget is reached
+5. Construct context: system prompt + enriched environment + retrieved rounds + last round (pinned) + current messages
+
+**Two injection modes:**
+- **Collapsed (default):** Injects a compact numbered index of retrieved rounds. The LLM calls `get_round_details()` / `get_tool_details()` to expand individual rounds. Massively reduces token overhead while preserving full granularity.
+- **Full:** Injects complete historical round text. Rich enough for the model to work without tools, but expensive.
 
 ### Context Budget
-- A percentage of the model's max context size (e.g., 50%)
+- A percentage of the model's max context size (default 50%)
+- Dynamic interpolation: at `MIN_SIMILARITY=0.30` the budget is 2,000 tokens; at 1.0 it's 50% of the context window
 - Room reserved for system prompt, current prompt, and model response
-- This mirrors the approximate approach used by current LLM agents
 
 ### Debug/Quality Logging
-- Each context construction is logged: which files were selected, in what order, how close they were
-- Enables review and improvement of retrieval quality over time
+- Each context construction is logged to the TUI status bar: which files selected, token usage, indexed count
+- Enables real-time review and improvement of retrieval quality
+
+## Known Problems
+
+### 1. Most-recent-round context loss
+In collapsed mode, the immediate predecessor round gets a compact numbered entry alongside all historical rounds. The model's ability to resolve "it", "that", "those changes" from the immediately preceding user message is impaired — a round that happened 30 seconds ago is treated the same as one from three weeks ago.
+
+**Current mitigation:** The `lastRoundFull` hack injects the last round's prompt + response (minus tool calls) as full text immediately before `currentMessages`. This works for simple reference resolution but doesn't extend to multi-turn chains.
+
+**Future direction:** A "recency buffer" that always keeps the last 3–5 rounds in full, outside the indexed retrieval logic.
+
+### 2. Embedding cost
+Every round saved costs 2 embedding API calls (prompt + response). Every context assembly costs 1 embedding call. Embedding costs are the main operational expense.
+
+### 3. Cache misses
+Because context is assembled dynamically, every prompt is a fresh embedding API call (cannot be cached). This is inherent to the approach — you can't predict the cache key when every prompt generates a novel query.
 
 ## Technology
 
 - **Platform:** [pi coding agent](https://pi.dev) — extensions
 - **Agent loop, tools, TUI, model abstraction:** Inherited from pi
-- **Round repository:** Flat files on disk
-- **Embeddings:** Any embedding API (tbd)
-- **Vector index:** Flat file + numpy
-- **Context assembly:** Extension hooks (`agent_start`, `message_end`, `agent_end`, `context`, `session_before_compact`, `session_compact`)
+- **Round repository:** Flat files on disk under a `rounds/` directory
+- **Embeddings:** OpenRouter API, `text-embedding-3-small`
+- **Vector index:** Flat CSV + cosine similarity in TypeScript
+- **Context assembly:** Extension hooks (`agent_start`, `agent_end`, `message_end`, `context`, `session_before_compact`, `session_compact`, `session_start`)
+- **Native tools:** `search_interactions`, `get_round_details`, `get_tool_details` (registered in `session_start`)
 
 ## Design Principles
 
@@ -65,33 +88,39 @@ Within a session, as context grows past the window, summarization compresses it.
 
 ## Roadmap
 
-### Phase 1 — MVP (Proof that extension hooks work)
-- [ ] Pi extension that wipes context clean on every round ("total amnesia")
-- [ ] Verify: model only sees current prompt, no prior conversation
-- [ ] Verify: no compaction fires
-- [ ] Verify: tools still work
-- [ ] Verify: TUI still works
+### ✅ Phase 1 — MVP (Proof that extension hooks work)
+- [x] Pi extension that wipes context clean on every round ("total amnesia")
+- [x] Verify: model only sees current prompt, no prior conversation
+- [x] Verify: no compaction fires
+- [x] Verify: tools still work
+- [x] Verify: TUI still works
 
-### Phase 2 — Round Repository
-- [ ] Save each completed round to a file on disk
-- [ ] Structure: `rounds/<id>.json` with prompt, response sequence, timestamps
-- [ ] Embed prompt and response separately
-- [ ] Maintain vector index file
+*Note: The amnesia extension was superseded by the real flashback extension. The concept was validated and then replaced.*
 
-### Phase 3 — Retrieval
-- [ ] On `context` hook, embed incoming prompt
-- [ ] Query index by distance
-- [ ] Assemble context from closest rounds up to token budget
-- [ ] Inject into the agent as replaced messages
+### ✅ Phase 2 — Round Repository
+- [x] Save each completed round to a file on disk
+- [x] Structure: `rounds/<id>.json` with prompt, response sequence, timestamps
+- [x] Embed prompt and response separately
+- [x] Maintain vector index file
+
+### ✅ Phase 3 — Retrieval
+- [x] On `context` hook, embed incoming prompt
+- [x] Query index by distance
+- [x] Assemble context from closest rounds up to token budget
+- [x] Inject into the agent as replaced messages
 
 ### Phase 4 — Quality & Iteration
-- [ ] Log context construction decisions
-- [ ] Experiment with different embedding models
+- [x] Log context construction decisions (status bar)
+- [x] Experiment with different embedding models (currently using `text-embedding-3-small` — switchable but not yet automated)
 - [ ] Experiment with prompt vs response vector weighting
 - [ ] Measure retrieval quality (precision/recall against manual ideal)
+- [ ] Explore collapse modes: variable collapse threshold by round score
+- [ ] Expose retrieval quality metrics in TUI
 
 ### Phase 5 — Advanced
 - [ ] Multiple embedding strategies per round
 - [ ] Hybrid retrieval (semantic + keyword/BM25)
-- [ ] User-directed context curation
+- [ ] User-directed context curation (exclude, pin, boost)
 - [ ] Cross-project round repository sharing
+- [ ] Recency buffer for the last N rounds (mitigates most-recent-round context loss)
+- [ ] Embedding model benchmarking & automatic selection
