@@ -221,6 +221,11 @@ let pendingCompactionTurnFiles: string[] | null = null;
 // Populated in agent_start, filtered in context to show only completed turns
 let agentTurnTimestamps = new Map<number, number>();
 
+// Context embedding cache — avoids redundant embedding API calls across tool turns
+// within the same agent cycle. Reset in agent_start.
+let lastContextUserPrompt: string | null = null;
+let lastContextVec: number[] = [];
+
 async function getApiKey(): Promise<string | null> {
   // 1. Environment variable
   const envKey = process.env.OPENROUTER_API_KEY;
@@ -326,8 +331,16 @@ export default function (pi: ExtensionAPI) {
       const apiKey = await getApiKey();
       if (!apiKey) return { messages };
 
-      // Embed the user prompt
-      const queryVec = normalize(await embedText(userPrompt, apiKey));
+      // Embed the user prompt — cached per agent cycle to avoid redundant API calls
+      // across multiple tool turns within the same user prompt.
+      let queryVec: number[];
+      if (userPrompt === lastContextUserPrompt) {
+        queryVec = lastContextVec;
+      } else {
+        queryVec = normalize(await embedText(userPrompt, apiKey));
+        lastContextUserPrompt = userPrompt;
+        lastContextVec = queryVec;
+      }
 
       // Load and score the index
       const index = loadIndex();
@@ -674,6 +687,10 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
     agentToolCallCount = 0;
     agentToolCallNames = [];
     agentToolCalls = [];
+
+    // Reset context embedding cache — new agent cycle = new user prompt
+    lastContextUserPrompt = null;
+    lastContextVec = [];
   });
 
   pi.on("message_end", async (event, _ctx) => {
