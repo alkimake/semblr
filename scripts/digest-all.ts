@@ -1,5 +1,5 @@
 /**
- * digest-all.ts — Bulk-embed all pi session JSONL files into the contexter index.
+ * digest-all.ts — Bulk-embed all pi session JSONL files into the flashback index.
  *
  * Iterates every session in ~/.pi/agent/sessions/, skips already-indexed rounds,
  * parallelizes embedding via OpenRouter.
