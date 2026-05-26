@@ -139,7 +139,7 @@ function buildTurnTimeline(currentTurnIndex: number | null): string | null {
 
 // ─────────────────────────────────────────────
 // Index CSV format:
-//   filePath,vectorElement1,vectorElement2,...
+//   base64url(vector_json),filePath
 //   (no header row)
 //   filePath includes :prompt or :response suffix
 // ─────────────────────────────────────────────
@@ -157,23 +157,8 @@ function loadIndex(): IndexEntry[] {
     const comma = line.indexOf(",");
     const b64 = line.slice(0, comma);
     const filePath = line.slice(comma + 1);
-    let vector: number[];
-    try {
-      // Format: base64url,fileName  where base64 is JSON.stringify of the vector
-      const decoded = JSON.parse(Buffer.from(b64, "base64url").toString("utf-8"));
-      vector = Array.isArray(decoded) ? decoded : [];
-    } catch {
-      // Fallback: try parsing as comma-separated numbers (old format)
-      const vecStr = line.slice(comma + 1);
-      const parts = vecStr.split(",");
-      // If the first element looks like a float, it's the old format (filePath,vec1,vec2,...)
-      if (parts.length > 1 && !isNaN(Number(parts[0]))) {
-        vector = parts.map(Number);
-      } else {
-        vector = [];
-      }
-    }
-    return { filePath, vector };
+    const decoded = JSON.parse(Buffer.from(b64, "base64url").toString("utf-8"));
+    return { filePath, vector: Array.isArray(decoded) ? decoded : [] };
   });
 }
 
