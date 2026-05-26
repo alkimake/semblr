@@ -19,7 +19,8 @@ import * as os from "node:os";
 // ─────────────────────────────────────────────
 
 const SESSIONS_DIR = path.resolve(os.homedir(), ".pi", "agent", "sessions");
-const ROUNDS_DIR = path.resolve(import.meta.dirname, "..", ".pi", "rounds");
+const ROUNDS_DIR = process.env.FLASHBACK_ROUNDS_DIR ||
+  path.resolve(os.homedir(), ".pi", "agent", "flashback", "rounds");
 const INDEX_PATH = path.resolve(ROUNDS_DIR, "index.csv");
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;

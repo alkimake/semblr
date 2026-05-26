@@ -19,8 +19,10 @@ import { spawnSync } from "node:child_process";
 // Config
 // ─────────────────────────────────────────────
 
-const PROJECT_ROOT = "/home/vedat/work/personal/flashback";
-const ROUNDS_DIR = `${PROJECT_ROOT}/.pi/rounds`;
+// PI_CODING_AGENT_DIR overrides the default ~/.pi/agent config directory.
+// We store flashback rounds under that directory so they survive project moves.
+const PI_CONFIG_DIR = process.env.PI_CODING_AGENT_DIR || `${os.homedir()}/.pi/agent`;
+const ROUNDS_DIR = `${PI_CONFIG_DIR}/flashback/rounds`;
 const INDEX_PATH = `${ROUNDS_DIR}/index.csv`;
 const EMBEDDING_MODEL = "openai/text-embedding-3-small";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/embeddings";
