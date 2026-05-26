@@ -5,12 +5,13 @@
  * Usage:
  *   npx tsx scripts/digest-session.ts <session-file>
  *
- * Output:
- *   .pi/rounds/<id>.json    — each round as a file
- *   .pi/rounds/index.csv    — vector index (base64(vector),filepath)
+ * Output (default, override with FLASHBACK_ROUNDS_DIR):
+ *   ~/.pi/agent/flashback/rounds/<id>.json  — each round as a file
+ *   ~/.pi/agent/flashback/rounds/index.csv  — vector index (base64(vector),filepath)
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 // ─────────────────────────────────────────────
@@ -55,7 +56,8 @@ interface SessionEntry {
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const EMBEDDING_MODEL = "openai/text-embedding-3-small";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"; // actually embeddings endpoint
-const ROUNDS_DIR = path.resolve(import.meta.dirname, "..", ".pi", "rounds");
+const ROUNDS_DIR = process.env.FLASHBACK_ROUNDS_DIR ||
+  path.resolve(os.homedir(), ".pi", "agent", "flashback", "rounds");
 const INDEX_PATH = path.resolve(ROUNDS_DIR, "index.csv");
 
 // ─────────────────────────────────────────────
@@ -218,7 +220,17 @@ function loadIndex(): Array<{ vector: number[]; filePath: string }> {
   if (!fs.existsSync(INDEX_PATH)) return [];
   const lines = fs.readFileSync(INDEX_PATH, "utf-8").trim().split("\n").filter(Boolean);
   return lines.map((line) => {
-    const [b64, filePath] = line.split(",", 2);
+    const parts = line.split(",");
+    // Detect format: new format has filepath:type as first field followed by raw floats;
+    // old format is base64url-encoded JSON array followed by filepath.
+    if (parts[0].endsWith(":prompt") || parts[0].endsWith(":response")) {
+      // New format: filepath,float0,float1,...,float1535
+      const filePath = parts[0];
+      const vector = parts.slice(1).map(Number);
+      return { vector, filePath };
+    }
+    // Old format: base64url,filepath
+    const [b64, filePath] = parts;
     const vector = JSON.parse(Buffer.from(b64, "base64url").toString("utf-8"));
     return { vector, filePath };
   });
