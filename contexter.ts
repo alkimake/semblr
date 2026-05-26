@@ -53,6 +53,45 @@ function extractText(content: Array<{ type: string; text?: string }>): string {
     .join(" ");
 }
 
+function formatTimestamp(ts: number): string {
+  const d = new Date(ts);
+  return d.toTimeString().slice(0, 8); // HH:MM:SS
+}
+
+function formatDelta(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  if (ms < 3600_000) return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`;
+  return `${Math.floor(ms / 3600_000)}h${Math.floor((ms % 3600_000) / 60_000)}m`;
+}
+
+function buildTurnTimeline(currentTurnIndex: number | null): string | null {
+  if (agentTurnTimestamps.size === 0) return null;
+
+  // Sort completed turns (those with index < current) chronologically
+  const completed = Array.from(agentTurnTimestamps.entries())
+    .filter(([ti]) => currentTurnIndex == null || ti < currentTurnIndex)
+    .sort(([a], [b]) => a - b);
+
+  if (completed.length === 0) return null;
+
+  const lines: string[] = [];
+  let prev: number | null = null;
+  for (const [ti, ts] of completed) {
+    const delta = prev != null ? ` (+${formatDelta(ts - prev)})` : "";
+    lines.push(`Turn ${ti + 1}: ${formatTimestamp(ts)}${delta}`);
+    prev = ts;
+  }
+
+  // Current turn marker
+  if (currentTurnIndex != null && agentTurnTimestamps.has(currentTurnIndex)) {
+    const currentTs = agentTurnTimestamps.get(currentTurnIndex)!;
+    lines.push(`[Current: turn ${currentTurnIndex + 1} — started ${formatTimestamp(currentTs)}]`);
+  }
+
+  return `Turn timeline:\n${lines.join("\n")}`;
+}
+
 // ─────────────────────────────────────────────
 // Index CSV format:
 //   filePath,vectorElement1,vectorElement2,...
@@ -147,6 +186,10 @@ let agentPendingToolCallIds: Map<string, ToolCallDetail> = new Map(); // toolCal
 
 // Stash between session_before_compact and session_compact
 let pendingCompactionTurnFiles: string[] | null = null;
+
+// Turn timeline tracking — maps turnIndex → start timestamp (ms)
+// Populated in agent_start, filtered in context to show only completed turns
+let agentTurnTimestamps = new Map<number, number>();
 
 async function getApiKey(): Promise<string | null> {
   // 1. Environment variable
@@ -390,6 +433,17 @@ export default function (pi: ExtensionAPI) {
       // are historical records — not the current conversation. This prevents
       // the model from mimicking tool calls or phrasing from past rounds.
       const contextMessages: Array<{ role: string; content: Array<{ type: string; text: string }> }> = [];
+
+      // Inject turn timeline as the first message — gives the agent a sense
+      // of pacing and when completed turns happened (1-based display).
+      const timeline = buildTurnTimeline(agentTurnIndex);
+      if (timeline) {
+        contextMessages.push({
+          role: "system",
+          content: [{ type: "text", text: timeline }],
+        });
+      }
+
       for (const round of dedupedRounds) {
         // Build tool metadata line to distinguish real work from discussion
         let toolMeta = "";
@@ -470,6 +524,9 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
       }
     }
     agentTurnIndex = event.turnIndex ?? null;
+    if (agentTurnIndex != null) {
+      agentTurnTimestamps.set(agentTurnIndex, Date.now());
+    }
     agentAccumulatedText = [];
     agentToolCallCount = 0;
     agentToolCallNames = [];
@@ -531,6 +588,11 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
 
   pi.on("agent_end", async (event, ctx) => {
     const { messages } = event;
+
+    // Note: we intentionally do NOT delete the timestamp here.
+    // The context hook filters by ti < currentTurnIndex to show only completed
+    // turns. If we deleted here, the next agent's context would have no
+    // timestamps to show (agent_end fires before the next agent_start).
 
     // Get user prompt -- prefer agent_start cached value, fall back to messages
     let userPrompt = agentUserPrompt ?? "";
