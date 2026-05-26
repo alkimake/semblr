@@ -15,6 +15,39 @@ Current AI agent sessions degrade as they accumulate context. Pi's compaction me
 
 The result: context that is **always roughly the same size, always the most relevant, and never lossy** — even across sessions.
 
+## Context Injection Architecture
+
+When Semblr retrieves relevant rounds, it injects them into the LLM's context. By default it uses **collapsed mode** — a compact numbered index rather than full text. This keeps context size predictable and stops historical rounds from drowning out the current task.
+
+### Why collapse?
+
+Every round contains the full assistant response — tool calls, thinking blocks, final answer. That's a lot of tokens, especially when the LLM might only need the gist to resolve a reference. Collapsing trades convenience for token efficiency: the LLM sees a short entry for each round and can **drill down on demand** using the provided tools.
+
+### Collapsed mode (default)
+
+Historical rounds appear as a numbered index in the system prompt:
+
+```
+1. a1b2c3d4.json [0.81 | 3 tools]: Why did we decide on PostgreSQL over MySQL?
+2. e5f6g7h8.json [0.64 | 0 tools]: Let's review the schema for the orders table
+```
+
+Each line shows the round's file ID, similarity score, tool count, and the full user prompt. The LLM never sees historical response text unless it expands.
+
+Every tool call inside a historical round is **redacted** into a stub:
+
+> `Turn 2: read — [REDACTED: arguments and result collapsed. Use get_tool_details("a1b2c3d4.json", 2) to expand.]`
+
+To see what actually happened, the model calls `get_round_details()` or `get_tool_details()` — like opening a file or reading a log.
+
+### Full mode
+
+Pass `semblr_mode: full` in your prompt. Retrieved rounds are injected as complete conversation text — user prompt, full response, everything. More tokens, zero tool calls needed. Useful when you're digging into a specific past thread and want the whole picture at once.
+
+### Last round always included
+
+There's one special case: the **most recent round** (the one immediately before the current prompt) is always injected at the end of context as a `[LAST ROUND — hash.json (collapsed)]` block. This gives the LLM a way to resolve "those changes" or "as I said" without searching. The last round shows the full prompt + response with tool calls collapsed, bridging the referential gap that a numbered index entry alone couldn't close.
+
 ## Cost
 
 Semblr has two sources of API cost:
@@ -28,6 +61,14 @@ Semblr has two sources of API cost:
 All embeddings go to OpenRouter → `text-embedding-3-small`. At current pricing (~$0.13/1M tokens for input, ~0.26/1M for output for text-embedding-3-small, but OpenRouter may add a small markup), the cost per embedding is on the order of fractions of a cent.
 
 The ongoing cost is ~1 embedding per user prompt.
+
+### Caching tradeoff
+
+Every user prompt is a **separate LLM call** with freshly assembled context. Even though the prompt looks similar to the last round's, the LLM provider sees each as an independent request — so there's **no KV/prompt cache carryover from round to round**. Each round pays full attention-computation cost on the newly injected rounds.
+
+**Within a round**, however, tool calls (like `get_round_details()` or `search_interactions()`) happen in the same LLM invocation — a single streaming conversation with back-and-forth tool turns. The provider's cache persists across those turns, so the cost of repeatedly expanding retrieved rounds from collapsed stubs is mostly in latency, not in re-processing the full context from scratch.
+
+The asymmetry: you pay for full re-processing between rounds, but within a round the tool-based drill-down is comparatively cheap.
 
 ## Index & Session Management
 
@@ -160,6 +201,48 @@ Rounds are stored in a global directory (outside the project tree) so they survi
 ## VISION.md
 
 For the full vision, design principles, architecture docs, and roadmap (with implemented items checked off), see [VISION.md](VISION.md).
+
+## Tools Reference
+
+Semblr registers three tools that the LLM can call to explore historical rounds. They're the interface between the collapsed index and the full conversation history.
+
+### `search_interactions`
+
+Searches all past conversations by semantic similarity.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `query` | string | What to find — natural language, not keywords |
+| `minSimilarity` | number (0–1) | Minimum similarity threshold. Default 0.25. Lower for broader matches |
+| `turns` | string[] | Optional — scope search to specific round files (drill into compaction summaries) |
+
+```
+# The LLM calls this to find past discussions
+search_interactions(query: "why did we pick PostgreSQL over MySQL")
+```
+
+Returns a list of matching round IDs with scores and previews.
+
+### `get_round_details`
+
+Retrieves the full content of a specific round — user prompt, full response, and all tool call metadata (with collapsed arguments).
+
+| Parameter | Type | Description |
+|---|---|---|
+| `round` | string | The round filename, e.g. `"a1b2c3d4.json"` |
+
+This is how the LLM expands a numbered index entry into the full conversation turn, including text it hasn't seen yet.
+
+### `get_tool_details`
+
+Expands a single collapsed tool call from a historical round — full arguments and complete result.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `round` | string | The round filename |
+| `index` | number | 0-based position in the round's toolCalls array |
+
+This is what "drill down" means: from a stub like `Turn 2: read — [REDACTED: ...]`, the LLM calls `get_tool_details("a1b2c3d4.json", 2)` and sees exactly what file was read and what it contained.
 
 ## License
 
