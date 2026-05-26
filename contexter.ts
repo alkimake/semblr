@@ -27,6 +27,11 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/embeddings";
 
 const CONTEXT_BUDGET_RATIO = 0.5; // 50% of model context window for historical rounds
 
+// Collapse mode: "full" injects complete historical rounds into context.
+// "collapsed" injects only a compact index — the LLM must use
+// get_round_details() / get_tool_details() to expand rounds it needs.
+const ROUND_COLLAPSE_MODE: "full" | "collapsed" = "collapsed";
+
 // ─────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────
@@ -56,6 +61,44 @@ function extractText(content: Array<{ type: string; text?: string }>): string {
 function formatTimestamp(ts: number): string {
   const d = new Date(ts);
   return d.toTimeString().slice(0, 8); // HH:MM:SS
+}
+
+/**
+ * Format a compact index of retrieved rounds for collapsed mode.
+ * Numbered list style — preserves full prompt text and paragraph
+ * structure so the LLM can weigh the full signal when deciding
+ * which rounds to expand via get_round_details().
+ *
+ * Format:
+ *   1. <hash> [0.78 | 8 tools]:
+ *      user: this is line 1
+ *
+ * this is line 2
+ *
+ * this is line 3
+ *      ---
+ *   2. <hash2> ...
+ */
+function formatCollapsedIndex(
+  rounds: Array<{ fileName: string; bestScore: number; data: RoundData }>
+): string {
+  const lines: string[] = [];
+  let idx = 0;
+  for (const round of rounds) {
+    idx++;
+    const toolCount = round.data.toolCallCount ?? 0;
+    // Indent each line of the user prompt by 6 spaces so paragraphs
+    // are visually distinct from the header line.
+    const promptLines = round.data.userPrompt
+      .split("\n")
+      .map((line, i) => i === 0 ? `  user: ${line}` : `  ${line}`);
+    lines.push(
+      `${idx}. ${round.fileName} [${round.bestScore.toFixed(2)} | ${toolCount} tools]:`
+    );
+    lines.push(...promptLines);
+    lines.push("  ---");
+  }
+  return lines.join("\n");
 }
 
 function formatDelta(ms: number): string {
@@ -244,9 +287,9 @@ function createRoundFilePath(userPrompt: string, responseText: string): string {
 }
 
 function appendToIndex(filePath: string, vector: number[]) {
-  const line = `${filePath},${vector.join(",")}\n`;
+  const b64 = Buffer.from(JSON.stringify(vector)).toString("base64url");
   fs.mkdirSync(ROUNDS_DIR, { recursive: true });
-  fs.appendFileSync(INDEX_PATH, line);
+  fs.appendFileSync(INDEX_PATH, `${b64},${filePath}\n`);
 }
 
 // ─────────────────────────────────────────────
@@ -394,6 +437,103 @@ export default function (pi: ExtensionAPI) {
         return { messages };
       }
 
+      // ── Branched context injection: full vs collapsed ──
+      if (ROUND_COLLAPSE_MODE === "collapsed") {
+        // Collapsed mode: inject only a compact index. The LLM expands
+        // rounds it needs via get_round_details() / get_tool_details().
+        const collapsedIndex = formatCollapsedIndex(
+          selectedRounds.map(r => ({ fileName: r.fileName, bestScore: r.bestScore, data: r.data }))
+        );
+
+        const uniqueRounds = new Set(
+          index.map((e: { filePath: string }) => e.filePath.replace(/:prompt$|:response$/, ""))
+        ).size;
+
+        ctx.ui.setStatus(
+          "contexter",
+          `🧠 collapsed: ${selectedRounds.length} rounds indexed from ${uniqueRounds} total`,
+        );
+
+        const timeline = buildTurnTimeline(agentTurnIndex);
+
+        const enrichedSystem = systemMsg
+          ? {
+              ...systemMsg,
+              content: typeof systemMsg.content === "string"
+                ? systemMsg.content + `
+
+[ENVIRONMENT]
+Host: ${os.hostname()}
+CWD: ${process.cwd()}
+Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+/, "")}`
+                : systemMsg.content,
+            }
+          : null;
+
+        // Find the last round (by fileName) — always added earlier.
+        // Inject the user prompt + collapsed agent turns (tool calls redacted,
+        // expandable via get_tool_details) + assistant text response.
+        // This replaces the old approach of dumping raw responseSequence, which
+        // mixed text and tool calls together. Now the model sees structured turns.
+        let lastRoundFull: Array<{ role: string; content: Array<{ type: string; text: string }> }> = [];
+        if (lastRoundFileName) {
+          const last = selectedRounds.find(r => r.fileName === lastRoundFileName);
+          if (last) {
+            // Build collapsed tool call turns
+            let toolTurnText = "";
+            if (last.data.toolCallCount != null && last.data.toolCallCount > 0 && last.data.toolCalls && last.data.toolCalls.length > 0) {
+              const turnLines = last.data.toolCalls.map((tc: ToolCallDetail) =>
+                `  Turn ${tc.index}: ${tc.name} — [REDACTED: arguments and result collapsed. Use get_tool_details("${last!.fileName}", ${tc.index}) to expand.]`
+              );
+              toolTurnText = "\n--- Agent turns (all tool calls redacted — use get_tool_details to expand) ---\n" + turnLines.join("\n");
+            } else if (last.data.toolCallCount === 0) {
+              toolTurnText = "\n--- Agent turns ---\n  (no tool calls — discussion only)";
+            }
+
+            lastRoundFull = [
+              {
+                role: "user",
+                content: [{ type: "text", text: `[LAST ROUND — ${lastRoundFileName} (collapsed)]
+User asked: ${last.data.userPrompt}${toolTurnText}` }],
+              },
+              {
+                role: "assistant",
+                content: [{ type: "text", text: `${last.data.responseSequence}` }],
+              },
+            ];
+          }
+        }
+
+        return {
+          messages: [
+            ...(enrichedSystem ? [enrichedSystem] : []),
+            // Preamble for collapsed mode
+            {
+              role: "system",
+              content: [{
+                type: "text",
+                text: `[HISTORICAL ROUND INDEX — use get_round_details("hash.json") to expand any round]
+Numbered list. Each entry: N. hash.json [score | N tools]: followed by full user prompt (indented).
+Use get_tool_details("hash.json", N) to inspect tool call N within a round.
+${timeline ? timeline + "\n" : ""}---`,
+              }],
+            },
+            // Compact index
+            {
+              role: "system",
+              content: [{
+                type: "text",
+                text: collapsedIndex,
+              }],
+            },
+            // Last round in full (sans tool calls) — for prompt parsing
+            ...lastRoundFull,
+            ...currentMessages,
+          ],
+        };
+      }
+
+      // ── Full mode (default): inject complete round content ──
       // Build context messages — chronological order (oldest first) for coherence
       // Chronological: prefer turnIndex within session, then userTimestamp as tiebreaker
       selectedRounds.sort((a, b) => {
@@ -434,7 +574,21 @@ export default function (pi: ExtensionAPI) {
       // the model from mimicking tool calls or phrasing from past rounds.
       const contextMessages: Array<{ role: string; content: Array<{ type: string; text: string }> }> = [];
 
-      // Inject turn timeline as the first message — gives the agent a sense
+      // ── Preamble: explain the historical round format ──
+      // Injected before the first round so the model understands what it's seeing.
+      contextMessages.push({
+        role: "system",
+        content: [{
+          type: "text",
+          text: `[HISTORICAL ROUND INDEX — relevance score (0.0–1.0) | tool count]
+Use get_round_details("hash.json") to expand a round's full conversation.
+Use get_tool_details("hash.json", N) to inspect tool call N within a round.
+The responses shown below are historical context, not your own voice.
+---`,
+        }],
+      });
+
+      // Inject turn timeline — gives the agent a sense
       // of pacing and when completed turns happened (1-based display).
       const timeline = buildTurnTimeline(agentTurnIndex);
       if (timeline) {
@@ -449,7 +603,7 @@ export default function (pi: ExtensionAPI) {
         let toolMeta = "";
         if (round.data.toolCallCount != null && round.data.toolCallCount > 0) {
           const names = round.data.toolCallNames?.length ? round.data.toolCallNames.join(", ") : "unknown";
-          toolMeta = ` [TOOLS USED: ${round.data.toolCallCount} calls — ${names}]`;
+          toolMeta = `${round.data.toolCallCount} tools`;
           // Add tool detail hints if available
           if (round.data.toolCalls && round.data.toolCalls.length > 0) {
             const hints = round.data.toolCalls.slice(0, 5).map(tc =>
@@ -459,12 +613,14 @@ export default function (pi: ExtensionAPI) {
             toolMeta += `\nUse get_tool_details("${round.fileName}", N) to inspect any call. Indexes: ${hints}${more}`;
           }
         } else if (round.data.toolCallCount === 0) {
-          toolMeta = ` [TOOLS USED: 0 — this was discussion only, no tools were executed]`;
+          toolMeta = `0 tools`;
         }
 
+        // Hash-first format: the round filename is the critical reference
+        // for get_tool_details() — put it first so it's easy to copy-paste.
         contextMessages.push({
           role: "user",
-          content: [{ type: "text", text: `[HISTORICAL ROUND from a past conversation — similarity: ${round.bestScore.toFixed(3)}${toolMeta}]
+          content: [{ type: "text", text: `[HISTORICAL ROUND — ${round.fileName} | similarity: ${round.bestScore.toFixed(3)} [TOOLS USED: ${toolMeta}]
 User asked: ${round.data.userPrompt}` }],
         });
         contextMessages.push({
@@ -878,14 +1034,14 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
           .sort((a, b) => b.similarity - a.similarity);
 
         // Group by round file, take best score per round
-        const roundScores = new Map<string, { data: RoundData; bestScore: number }>();
+        const roundScores = new Map<string, { fileName: string; data: RoundData; bestScore: number }>();
         for (const entry of scored) {
           const roundFile = entry.filePath.replace(/:prompt$|:response$/, "");
           if (!roundFile.endsWith(".json")) continue;
           if (roundScores.has(roundFile)) continue;
           const roundData = readRoundFile(entry.filePath);
           if (!roundData) continue;
-          roundScores.set(roundFile, { data: roundData, bestScore: entry.similarity });
+          roundScores.set(roundFile, { fileName: roundFile, data: roundData, bestScore: entry.similarity });
         }
 
         const sorted = Array.from(roundScores.values())
@@ -898,7 +1054,9 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
           };
         }
 
-        // Build result text — top 5 rounds with score
+        // Build result text — top 5 rounds with score.
+        // Branch: collapsed mode shows full prompt + tool turn index + full response;
+        // full mode keeps the existing truncated format.
         const MIN_SIMILARITY = threshold;
         const lines: string[] = [];
         let count = 0;
@@ -909,10 +1067,34 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
           const toolStr = round.data.toolCallCount != null && round.data.toolCallCount > 0
             ? ` | ${round.data.toolCallCount} tools (${(round.data.toolCallNames ?? []).join(", ")})`
             : (round.data.toolCallCount === 0 ? " | 0 tools (discussion only)" : "");
-          lines.push(`--- Round (score: ${round.bestScore.toFixed(3)}${toolStr}) ---`);
-          lines.push(`User: ${round.data.userPrompt.slice(0, 500)}`);
-          lines.push(`Assistant: ${round.data.responseSequence.slice(0, 1000)}`);
-          lines.push("");
+
+          if (ROUND_COLLAPSE_MODE === "collapsed") {
+            // Collapsed: full prompt + tool turn index + full response.
+            // Exposes the round filename so the model can call get_round_details().
+            lines.push(`--- Round ${round.fileName} (score: ${round.bestScore.toFixed(3)}${toolStr}) ---`);
+            lines.push(`User: ${round.data.userPrompt}`);
+
+            // Build collapsed tool call turns (mirrors last-round-context injection)
+            if (round.data.toolCallCount != null && round.data.toolCallCount > 0 && round.data.toolCalls && round.data.toolCalls.length > 0) {
+              const turnLines = round.data.toolCalls.map((tc: ToolCallDetail) =>
+                `  Turn ${tc.index}: ${tc.name} — [REDACTED: arguments and result collapsed. Use get_tool_details("${round.fileName}", ${tc.index}) to expand.]`
+              );
+              lines.push("--- Agent turns (all tool calls redacted — use get_tool_details to expand) ---");
+              lines.push(...turnLines);
+            } else if (round.data.toolCallCount === 0) {
+              lines.push("--- Agent turns ---");
+              lines.push("  (no tool calls — discussion only)");
+            }
+
+            lines.push(`Assistant: ${round.data.responseSequence}`);
+            lines.push("");
+          } else {
+            // Full mode: truncated format (existing behavior)
+            lines.push(`--- Round (score: ${round.bestScore.toFixed(3)}${toolStr}) ---`);
+            lines.push(`User: ${round.data.userPrompt.slice(0, 500)}`);
+            lines.push(`Assistant: ${round.data.responseSequence.slice(0, 1000)}`);
+            lines.push("");
+          }
         }
 
         if (count === 0) {
@@ -925,6 +1107,77 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
         return {
           content: [{ type: "text", text: `Found ${count} relevant rounds:\n\n${lines.join("\n")}` }],
           details: { matched: count, topScore: sorted[0].bestScore },
+        };
+      },
+    });
+
+    // Register get_round_details — retrieve the full content of a round file
+    pi.registerTool({
+      name: "get_round_details",
+      label: "Get Round Details",
+      description: "Retrieve the full content of a past conversation round by its filename hash. Unlike the truncated previews injected into context (which show only the first portion of the user prompt and assistant response), this returns the complete userPrompt and responseSequence for that round, plus all tool call metadata. Use this when you need to see the full conversation from a historical round — especially compacted/summarized rounds where the context injection only shows a summary line.\n\nParameters:\n- round: the round filename (e.g., 'abc123.json')",
+      promptSnippet: "Get full details of a past conversation round",
+      parameters: Type.Object({
+        round: Type.String({ description: "The round filename to look up (e.g., 'abc123def456.json')" }),
+      }),
+      async execute(toolCallId, params, signal, onUpdate, ctx2) {
+        const p = params as { round: string };
+
+        const fullPath = `${ROUNDS_DIR}/${p.round}`;
+        if (!fs.existsSync(fullPath)) {
+          return {
+            content: [{ type: "text", text: `Round file not found: ${p.round}` }],
+            details: {},
+          };
+        }
+
+        let roundData: Record<string, unknown>;
+        try {
+          roundData = JSON.parse(fs.readFileSync(fullPath, "utf-8"));
+        } catch {
+          return {
+            content: [{ type: "text", text: `Failed to parse round file: ${p.round}` }],
+            details: {},
+          };
+        }
+
+        // Build a readable summary of the full round
+        const typeLabel = roundData.type === "compaction_summary" ? " [COMPACTION SUMMARY]" : "";
+        let toolMeta = "";
+        if (roundData.toolCallCount != null && Number(roundData.toolCallCount) > 0) {
+          const names = (roundData.toolCallNames as string[])?.join(", ") ?? "unknown";
+          toolMeta = `\n  Tools used: ${roundData.toolCallCount} (${names})`;
+          if (roundData.toolCalls && Array.isArray(roundData.toolCalls) && (roundData.toolCalls as any[]).length > 0) {
+            const hints = (roundData.toolCalls as any[]).slice(0, 10).map((tc: any) =>
+              `${tc.index}:${tc.name}`
+            ).join(" ");
+            const more = (roundData.toolCalls as any[]).length > 10 ? ` ...+${(roundData.toolCalls as any[]).length - 10} more` : "";
+            toolMeta += `\n  Indexes: ${hints}${more}\n  ALL tool call arguments and results are REDACTED — use get_tool_details("${p.round}", N) to expand individual calls.`;
+          }
+        } else if (roundData.toolCallCount === 0) {
+          toolMeta = "\n  Tools used: 0 (discussion only)";
+        }
+
+        // Collapse tool call arguments and results in the details object.
+        // Even when a round is "expanded" via get_round_details, the tool call
+        // internals stay redacted — you must drill in with get_tool_details().
+        const collapsedDetails = { ...roundData };
+        if (collapsedDetails.toolCalls && Array.isArray(collapsedDetails.toolCalls)) {
+          collapsedDetails.toolCalls = (collapsedDetails.toolCalls as any[]).map((tc: any) => ({
+            ...tc,
+            arguments: `[REDACTED — use get_tool_details("${p.round}", ${tc.index}) to expand]`,
+            result_summary: `[REDACTED — use get_tool_details("${p.round}", ${tc.index}) to expand]`,
+          }));
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: `=== Round: ${p.round}${typeLabel} ===\n` +
+              `User: ${roundData.userPrompt ?? "(empty)"}\n` +
+              `Assistant: ${roundData.responseSequence ?? "(empty)"}${toolMeta}`,
+          }],
+          details: collapsedDetails,
         };
       },
     });
