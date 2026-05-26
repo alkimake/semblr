@@ -1,8 +1,8 @@
-# Flashback — Project Vision
+# Semblr — Project Vision
 
 ## Elevator Pitch
 
-Current AI agent sessions are reborn every time you start one. Every chat, every context, every insight — gone. Within a session, context decays through lossy summarization the moment you exceed the window. Flashback replaces this with **semantic context assembly**: rounds are stored permanently as individual files, embedded, and retrieved by relevance — not recency. The context is always roughly the same size, always the most relevant to what you're working on.
+Current AI agent sessions are reborn every time you start one. Every chat, every context, every insight — gone. Within a session, context decays through lossy summarization the moment you exceed the window. Semblr replaces this with **semantic context assembly**: rounds are stored permanently as individual files, embedded, and retrieved by relevance — not recency. The context is always roughly the same size, always the most relevant to what you're working on.
 
 ## Core Problems Solved
 
@@ -95,7 +95,7 @@ Because context is assembled dynamically, every prompt is a fresh embedding API 
 - [x] Verify: tools still work
 - [x] Verify: TUI still works
 
-*Note: The amnesia extension was superseded by the real flashback extension. The concept was validated and then replaced.*
+*Note: The amnesia extension was superseded by the real semblr extension. The concept was validated and then replaced.*
 
 ### ✅ Phase 2 — Round Repository
 - [x] Save each completed round to a file on disk
