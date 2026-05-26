@@ -225,6 +225,7 @@ let agentTurnTimestamps = new Map<number, number>();
 // within the same agent cycle. Reset in agent_start.
 let lastContextUserPrompt: string | null = null;
 let lastContextVec: number[] = [];
+let agentPromptVec: number[] | null = null; // cached from context hook, reused in agent_end to avoid redundant embed
 
 async function getApiKey(): Promise<string | null> {
   // 1. Environment variable
@@ -324,7 +325,7 @@ export default function (pi: ExtensionAPI) {
       return { messages };
     }
 
-    // No longer caching for agent_end -- agent_start handles it cleanly
+    // agentPromptVec is stashed after embedding below for agent_end to reuse
 
 
     try {
@@ -341,6 +342,9 @@ export default function (pi: ExtensionAPI) {
         lastContextUserPrompt = userPrompt;
         lastContextVec = queryVec;
       }
+      // Stash for agent_end to reuse (saves 1 embedding call per round)
+      agentPromptVec = queryVec;
+
 
       // Load and score the index
       const index = loadIndex();
@@ -691,6 +695,7 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
     // Reset context embedding cache — new agent cycle = new user prompt
     lastContextUserPrompt = null;
     lastContextVec = [];
+    agentPromptVec = null;
   });
 
   pi.on("message_end", async (event, _ctx) => {
@@ -843,7 +848,9 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
 
     try {
       const [promptVec, responseVec] = await Promise.all([
-        embedText(userPrompt, apiKey),
+        agentPromptVec
+          ? Promise.resolve(agentPromptVec)
+          : embedText(userPrompt, apiKey),
         embedText(responseText, apiKey),
       ]);
       appendToIndex(`${roundFileName}:prompt`, promptVec);
