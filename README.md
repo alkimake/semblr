@@ -1,12 +1,12 @@
-# Flashback
+# Semblr
 
-**Semantic context assembly for AI agents.** Instead of lossy summarization, Flashback stores every conversation round permanently, embeds it, and retrieves the most relevant rounds on each user prompt — by meaning, not by recency.
+**Semantic context assembly for AI agents.** Instead of lossy summarization, Semblr stores every conversation round permanently, embeds it, and retrieves the most relevant rounds on each user prompt — by meaning, not by recency.
 
-Runs as a [pi coding agent](https://pi.dev) extension at `.pi/extensions/flashback.ts`.
+Runs as a [pi coding agent](https://pi.dev) extension at `.pi/extensions/semblr.ts`.
 
 ## Premise
 
-Current AI agent sessions degrade as they accumulate context. Pi's compaction mechanism summarises past rounds to free memory, but the summaries lose detail. Flashback replaces this with a different approach:
+Current AI agent sessions degrade as they accumulate context. Pi's compaction mechanism summarises past rounds to free memory, but the summaries lose detail. Semblr replaces this with a different approach:
 
 1. **Save every round permanently.** Each user prompt + full assistant response sequence (tool calls, thinking, final answer) is saved as an individual JSON file.
 2. **Embed prompt and response.** Both are sent to an embedding API (`text-embedding-3-small`) and stored as vectors in an append-only CSV index.
@@ -17,7 +17,7 @@ The result: context that is **always roughly the same size, always the most rele
 
 ## Cost
 
-Flashback has two sources of API cost:
+Semblr has two sources of API cost:
 
 | Operation | Cost per invocation |
 |---|---|
@@ -31,9 +31,9 @@ The ongoing cost is ~1 embedding per user prompt.
 
 ## Index & Session Management
 
-Flashback stores conversation data in two areas, both outside the project tree so they survive repository moves:
+Semblr stores conversation data in two areas, both outside the project tree so they survive repository moves:
 
-### Round Storage (`FLASHBACK_ROUNDS_DIR`)
+### Round Storage (`SEMBLR_ROUNDS_DIR`)
 
 | File | Purpose |
 |---|---|
@@ -44,7 +44,7 @@ Round IDs are content-addressed (MD5 of `userPrompt + responseSequence`), so re-
 
 ### Digest Scripts
 
-Two scripts parse historical pi session files (JSONL format) into flashback rounds:
+Two scripts parse historical pi session files (JSONL format) into semblr rounds:
 
 | Script | What it does |
 |---|---|
@@ -70,7 +70,7 @@ This makes it safe to run repeatedly — only unindexed session data gets embedd
 
 ### Session file format
 
-Pi stores session data as JSONL files in its session directory. Each line is a JSON event with a `type` field. Flashback filters for `type: "message"` entries and pairs `user` messages with subsequent `assistant` and `toolResult` messages to reconstruct full rounds.
+Pi stores session data as JSONL files in its session directory. Each line is a JSON event with a `type` field. Semblr filters for `type: "message"` entries and pairs `user` messages with subsequent `assistant` and `toolResult` messages to reconstruct full rounds.
 
 ### Utility commands
 
@@ -104,26 +104,26 @@ In collapsed mode (the default), every retrieved round — including the immedia
 **Future fix:** A recency buffer that keeps the last 3–5 rounds in full, outside the indexed retrieval logic.
 
 ### Embedding API dependency
-Flashback requires a working OpenRouter API key (or an alternative embedding endpoint) to function. If the API is unreachable, context assembly falls back to a no-op (no historical context injected). The extension degrades gracefully but silently.
+Semblr requires a working OpenRouter API key (or an alternative embedding endpoint) to function. If the API is unreachable, context assembly falls back to a no-op (no historical context injected). The extension degrades gracefully but silently.
 
 ### No local embedding fallback
 Currently only one embedding model (`text-embedding-3-small` via OpenRouter) is wired. There is no local embedding option (e.g., `sentence-transformers` → ONNX → TypeScript). Adding one would eliminate the API dependency and cost for index queries.
 
 ## Quick Start
 
-Flashback runs automatically when the extension is loaded:
+Semblr runs automatically when the extension is loaded:
 
 ```bash
 # Verify it's working
-pi -e .pi/extensions/flashback.ts
+pi -e .pi/extensions/semblr.ts
 ```
 
-Check that the status bar shows `🧠 flashback loaded — N rounds indexed`.
+Check that the status bar shows `🧠 semblr loaded — N rounds indexed`.
 
 ### Bulk-indexing historical sessions
 
 ```bash
-# Index all historical pi sessions into flashback
+# Index all historical pi sessions into semblr
 just index
 ```
 
@@ -142,7 +142,7 @@ just query "what did we discuss about caching"
 .pipermanent_extension/
 ├── .pi/
 │   └── extensions/
-│       └── flashback.ts          # The extension (~1240 lines)
+│       └── semblr.ts          # The extension (~1240 lines)
 ├── scripts/
 │   ├── digest-all.ts             # Bulk-embed all historical sessions
 │   ├── digest-session.ts         # Embed a single session file

@@ -1,13 +1,13 @@
 /**
  * digest-session.ts — Parse a pi session JSONL into rounds, embed them via OpenRouter,
- * and build a vector index.
+ * and build a vector index for semblr.
  *
  * Usage:
  *   npx tsx scripts/digest-session.ts <session-file>
  *
- * Output (default, override with FLASHBACK_ROUNDS_DIR):
- *   ~/.pi/agent/flashback/rounds/<id>.json  — each round as a file
- *   ~/.pi/agent/flashback/rounds/index.csv  — vector index (base64(vector),filepath)
+ * Output (default, override with SEMBLR_ROUNDS_DIR):
+ *   ~/.pi/agent/semblr/rounds/<id>.json  — each round as a file
+ *   ~/.pi/agent/semblr/rounds/index.csv  — vector index (base64(vector),filepath)
  */
 
 import * as fs from "node:fs";
@@ -56,8 +56,8 @@ interface SessionEntry {
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const EMBEDDING_MODEL = "openai/text-embedding-3-small";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"; // actually embeddings endpoint
-const ROUNDS_DIR = process.env.FLASHBACK_ROUNDS_DIR ||
-  path.resolve(os.homedir(), ".pi", "agent", "flashback", "rounds");
+const ROUNDS_DIR = process.env.SEMBLR_ROUNDS_DIR ||
+  path.resolve(os.homedir(), ".pi", "agent", "semblr", "rounds");
 const INDEX_PATH = path.resolve(ROUNDS_DIR, "index.csv");
 
 // ─────────────────────────────────────────────

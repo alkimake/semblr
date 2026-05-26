@@ -1,5 +1,5 @@
 /**
- * digest-all.ts — Bulk-embed all pi session JSONL files into the flashback index.
+ * digest-all.ts — Bulk-embed all pi session JSONL files into the semblr index.
  *
  * Iterates every session in ~/.pi/agent/sessions/, skips already-indexed rounds,
  * parallelizes embedding via OpenRouter.
@@ -19,8 +19,8 @@ import * as os from "node:os";
 // ─────────────────────────────────────────────
 
 const SESSIONS_DIR = path.resolve(os.homedir(), ".pi", "agent", "sessions");
-const ROUNDS_DIR = process.env.FLASHBACK_ROUNDS_DIR ||
-  path.resolve(os.homedir(), ".pi", "agent", "flashback", "rounds");
+const ROUNDS_DIR = process.env.SEMBLR_ROUNDS_DIR ||
+  path.resolve(os.homedir(), ".pi", "agent", "semblr", "rounds");
 const INDEX_PATH = path.resolve(ROUNDS_DIR, "index.csv");
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
