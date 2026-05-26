@@ -1,4 +1,4 @@
-# ── contexter ─────────────────────────────────────────────────────────────────
+# ── flashback ─────────────────────────────────────────────────────────────────
 # See VISION.md for architecture and AGENTS.md for project context.
 
 # Index all new turns from pi session files

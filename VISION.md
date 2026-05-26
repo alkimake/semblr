@@ -1,8 +1,8 @@
-# Contexter — Project Vision
+# Flashback — Project Vision
 
 ## Elevator Pitch
 
-Current AI agent sessions are reborn every time you start one. Every chat, every context, every insight — gone. Within a session, context decays through lossy summarization the moment you exceed the window. Contexter replaces this with **semantic context assembly**: rounds are stored permanently as individual files, embedded, and retrieved by relevance — not recency. The context is always roughly the same size, always the most relevant to what you're working on.
+Current AI agent sessions are reborn every time you start one. Every chat, every context, every insight — gone. Within a session, context decays through lossy summarization the moment you exceed the window. Flashback replaces this with **semantic context assembly**: rounds are stored permanently as individual files, embedded, and retrieved by relevance — not recency. The context is always roughly the same size, always the most relevant to what you're working on.
 
 ## Core Problems Solved
 

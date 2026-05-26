@@ -1,11 +1,11 @@
 /**
- * contexter — Retrieval-Augmented Context Assembly
+ * flashback — Retrieval-Augmented Context Assembly
  *
  * At agent_end: save the completed round to .pi/rounds/ and embed it.
  * At context: embed the current user prompt, query the vector index,
  *             inject the top-matching rounds as context for the LLM.
  *
- * Replaces contexter-amnesia.ts — no wiping, just smart retrieval.
+ * Replaces flashback-amnesia.ts — no wiping, just smart retrieval.
  */
 
 import type { ExtensionAPI, ContextEvent } from "@earendil-works/pi-coding-agent";
@@ -19,7 +19,7 @@ import { spawnSync } from "node:child_process";
 // Config
 // ─────────────────────────────────────────────
 
-const PROJECT_ROOT = "/home/vedat/work/personal/contexter";
+const PROJECT_ROOT = "/home/vedat/work/personal/flashback";
 const ROUNDS_DIR = `${PROJECT_ROOT}/.pi/rounds`;
 const INDEX_PATH = `${ROUNDS_DIR}/index.csv`;
 const EMBEDDING_MODEL = "openai/text-embedding-3-small";
@@ -431,7 +431,7 @@ export default function (pi: ExtensionAPI) {
 
       if (selectedRounds.length === 0) {
         ctx.ui.setStatus(
-          "contexter",
+          "flashback",
           `🧠 no relevant context (best: ${bestScore.toFixed(3)})`,
         );
         return { messages };
@@ -450,7 +450,7 @@ export default function (pi: ExtensionAPI) {
         ).size;
 
         ctx.ui.setStatus(
-          "contexter",
+          "flashback",
           `🧠 collapsed: ${selectedRounds.length} rounds indexed from ${uniqueRounds} total`,
         );
 
@@ -631,7 +631,7 @@ ${round.data.responseSequence}` }],
       }
 
       ctx.ui.setStatus(
-        "contexter",
+        "flashback",
         `🧠 retrieved ${dedupedRounds.length} rounds (${usedTokens} tok) from ${uniqueRounds} indexed`,
       );
 
@@ -657,7 +657,7 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
         ],
       };
     } catch (err) {
-      ctx.ui.setStatus("contexter", `🧠 error: ${(err as Error).message}`);
+      ctx.ui.setStatus("flashback", `🧠 error: ${(err as Error).message}`);
     }
   });
 
@@ -765,7 +765,7 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
     }
 
     if (!userPrompt) {
-      ctx.ui.setStatus("contexter", "\u{1f9e0} agent_end: no user prompt to save");
+      ctx.ui.setStatus("flashback", "\u{1f9e0} agent_end: no user prompt to save");
       return;
     }
 
@@ -785,7 +785,7 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
     }
 
     if (!responseText) {
-      ctx.ui.setStatus("contexter", "\u{1f9e0} agent_end: no response text");
+      ctx.ui.setStatus("flashback", "\u{1f9e0} agent_end: no response text");
       return;
     }
 
@@ -796,7 +796,7 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
 
     // Skip if already saved (deduplication by content hash)
     if (fs.existsSync(roundPath)) {
-      ctx.ui.setStatus("contexter", `\u{1f9e0} round already saved (${roundFileName})`);
+      ctx.ui.setStatus("flashback", `\u{1f9e0} round already saved (${roundFileName})`);
       lastRoundFileName = roundFileName;
       agentAccumulatedText = [];
       agentUserPrompt = null;
@@ -819,7 +819,7 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
     try {
       fs.writeFileSync(roundPath, JSON.stringify(roundData, null, 2));
     } catch (err) {
-      ctx.ui.setStatus("contexter", `\u{1f9e0} write error: ${(err as Error).message}`);
+      ctx.ui.setStatus("flashback", `\u{1f9e0} write error: ${(err as Error).message}`);
       agentAccumulatedText = [];
       agentUserPrompt = null;
       agentTurnIndex = null;
@@ -829,7 +829,7 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
     // Embed prompt and response separately
     const apiKey = await getApiKey();
     if (!apiKey) {
-      ctx.ui.setStatus("contexter", "\u{1f9e0} saved but not embedded (no API key)");
+      ctx.ui.setStatus("flashback", "\u{1f9e0} saved but not embedded (no API key)");
       lastRoundFileName = roundFileName;
       agentAccumulatedText = [];
       agentUserPrompt = null;
@@ -845,11 +845,11 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
       appendToIndex(`${roundFileName}:prompt`, promptVec);
       appendToIndex(`${roundFileName}:response`, responseVec);
       ctx.ui.setStatus(
-        "contexter",
+        "flashback",
         `\u{1f9e0} saved + embedded round (${roundFileName})`,
       );
     } catch (err) {
-      ctx.ui.setStatus("contexter", `\u{1f9e0} embedding error: ${(err as Error).message}`);
+      ctx.ui.setStatus("flashback", `\u{1f9e0} embedding error: ${(err as Error).message}`);
     }
 
     lastRoundFileName = roundFileName;
@@ -948,10 +948,10 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
         const vec = await embedText(summaryText, apiKey);
         appendToIndex(`${roundFileName}:prompt`, vec);
         appendToIndex(`${roundFileName}:response`, vec);
-        ctx.ui.setStatus("contexter", `📚 compaction summary saved (${referencedTurns.length} rounds referenced)`);
+        ctx.ui.setStatus("flashback", `📚 compaction summary saved (${referencedTurns.length} rounds referenced)`);
       }
     } catch (err) {
-      ctx.ui.setStatus("contexter", `🧠 compaction embed error: ${(err as Error).message}`);
+      ctx.ui.setStatus("flashback", `🧠 compaction embed error: ${(err as Error).message}`);
     }
   });
 
@@ -967,7 +967,7 @@ Current date/time: ${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
       index.map((e: { filePath: string }) => e.filePath.replace(/:prompt$|:response$/, ""))
     ).size;
     ctx.ui.notify(
-      `🧠 contexter loaded — ${uniqueRounds} rounds indexed`,
+      `🧠 flashback loaded — ${uniqueRounds} rounds indexed`,
       "info",
     );
 

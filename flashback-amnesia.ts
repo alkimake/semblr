@@ -1,5 +1,5 @@
 /**
- * contexter — MVP: Total Amnesia
+ * flashback — MVP: Total Amnesia
  *
  * Wipes ALL accumulated context between turns.
  * The LLM sees: system prompt + ALL messages from the current turn
@@ -43,7 +43,7 @@ export default function (pi: ExtensionAPI) {
 
     const wiped = messages.length - kept.length;
     ctx.ui.setStatus(
-      "contexter",
+      "flashback",
       `🧠 amnesia: wiped ${wiped} msgs from prior turns, kept ${kept.length}`,
     );
 
@@ -62,7 +62,7 @@ export default function (pi: ExtensionAPI) {
   // ──────────────────────────────────────────────
   pi.on("turn_end", async (event, ctx) => {
     ctx.ui.setStatus(
-      "contexter",
+      "flashback",
       `✅ turn ${event.turnIndex + 1} complete`,
     );
   });
@@ -71,6 +71,6 @@ export default function (pi: ExtensionAPI) {
   // 4. STARTUP NOTIFICATION
   // ──────────────────────────────────────────────
   pi.on("session_start", async (_event, ctx) => {
-    ctx.ui.notify("🧠 contexter loaded — total amnesia mode", "info");
+    ctx.ui.notify("🧠 flashback loaded — total amnesia mode", "info");
   });
 }
