@@ -45,6 +45,14 @@ install:
 uninstall:
     pi remove ./src/semblr.ts
 
+# Fix round files with mis-assigned tool results from parallel pi invocations.
+# Re-parses session JSONL files and migrates broken round files.
+# Usage: just fix-round-ids
+#        just fix-round-ids --dry-run
+fix-round-ids *args:
+    SEMBLR_ROUNDS_DIR="{{SEMBLR_ROUNDS_DIR}}" \
+        npx tsx scripts/fix-round-tool-ids.ts {{args}}
+
 # Run all pending round migrations (idempotent — safe to re-run)
 # Round migrations first, then index migration (model column)
 migrate *args:
