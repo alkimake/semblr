@@ -2,6 +2,7 @@ import { createRoundFilePath } from "./hash.ts";
 
 interface ParsedToolCallDetail {
 	index: number;
+	id?: string;
 	name: string;
 	arguments: string;
 	result_summary: string;
@@ -43,6 +44,7 @@ interface SessionEntry {
 		content?: Array<Record<string, unknown>>;
 		timestamp?: number;
 		toolName?: string;
+		toolCallId?: string;
 	};
 }
 
@@ -132,8 +134,10 @@ export function parsePiSessionJsonl(raw: string, options: ParsePiSessionOptions 
 					toolCallCount++;
 					const name = typeof block.name === "string" ? block.name : undefined;
 					if (name) toolNames.push(name);
+					const id = typeof block.id === "string" ? block.id : undefined;
 					toolCalls.push({
 						index: toolCalls.length,
+						id,
 						name: name ?? "unknown",
 						arguments: JSON.stringify(block.arguments ?? {}),
 						result_summary: "",
@@ -144,13 +148,31 @@ export function parsePiSessionJsonl(raw: string, options: ParsePiSessionOptions 
 		} else if (role === "toolResult" && currentUserMsg) {
 			const toolName = entry.message.toolName;
 			if (toolName) toolNames.push(toolName);
-			for (let i = toolCalls.length - 1; i >= 0; i--) {
-				if (toolCalls[i].result_summary === "") {
-					const resultText = parsePiTextContent(entry.message.content);
-					toolCalls[i].result_summary = resultText.slice(0, 300);
-					toolCalls[i].result_full = resultText;
-					toolCalls[i].result_truncated = false;
-					break;
+			const toolCallId = typeof entry.message.toolCallId === "string" ? entry.message.toolCallId : undefined;
+			const resultText = parsePiTextContent(entry.message.content);
+
+			// Prefer ID-based matching for parallel tool call correctness.
+			// Falls back to reverse-sequential scan (most-recent pending) for
+			// session formats that lack toolCallId fields.
+			let matched = false;
+			if (toolCallId) {
+				const target = toolCalls.find((tc) => tc.id === toolCallId && tc.result_summary === "");
+				if (target) {
+					target.result_summary = resultText.slice(0, 300);
+					target.result_full = resultText;
+					target.result_truncated = false;
+					matched = true;
+				}
+			}
+
+			if (!matched) {
+				for (let i = toolCalls.length - 1; i >= 0; i--) {
+					if (toolCalls[i].result_summary === "") {
+						toolCalls[i].result_summary = resultText.slice(0, 300);
+						toolCalls[i].result_full = resultText;
+						toolCalls[i].result_truncated = false;
+						break;
+					}
 				}
 			}
 		}

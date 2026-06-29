@@ -210,6 +210,7 @@ export function applyMessageEndToState(message: unknown, state: MessageEndProces
 					if (id && name) {
 						const detail: ToolCallDetail = {
 							index: state.toolCalls.length,
+							id,
 							name,
 							arguments: JSON.stringify(blockRec.arguments ?? {}),
 							result_summary: "",
@@ -225,21 +226,31 @@ export function applyMessageEndToState(message: unknown, state: MessageEndProces
 	}
 
 	if (msg.role === "toolResult") {
-		// Pair tool results with their calls
+		// Pair tool results with their calls.
+		// Prefer ID-based matching (precise, deterministic) and fall back to
+		// backward sequential scan for legacy round data that lacks toolCallId.
 		const toolCallId = msg.toolCallId;
 		if (toolCallId) {
-			// Find the matching ToolCallDetail by matching the last call without a result
-			// (pi sessions don't expose the toolCallId -> toolCall mapping directly, so
-			// we match sequentially — results arrive in order)
-			for (let i = state.toolCalls.length - 1; i >= 0; i--) {
-				if (state.toolCalls[i].result_summary === "") {
-					const resultContent = msg.content as Array<{ type: string; text?: string }> | undefined;
-					const resultText = resultContent ? extractText(resultContent) : "";
-					state.toolCalls[i].result_summary = resultText.slice(0, 300);
-					state.toolCalls[i].result_full = resultText;
-					state.toolCalls[i].result_truncated = false;
-					break;
+			const resultContent = msg.content as Array<{ type: string; text?: string }> | undefined;
+			const resultText = resultContent ? extractText(resultContent) : "";
+
+			// Try ID-based match first
+			let target = state.toolCalls.find((tc) => tc.id === toolCallId && tc.result_summary === "");
+
+			// Fallback: backward sequential scan (legacy round data without IDs)
+			if (!target) {
+				for (let i = state.toolCalls.length - 1; i >= 0; i--) {
+					if (state.toolCalls[i].result_summary === "") {
+						target = state.toolCalls[i];
+						break;
+					}
 				}
+			}
+
+			if (target) {
+				target.result_summary = resultText.slice(0, 300);
+				target.result_full = resultText;
+				target.result_truncated = false;
 			}
 		}
 	}

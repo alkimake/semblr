@@ -466,6 +466,56 @@ describe("applyMessageEndToState", () => {
 		expect(state.responseSegments).toEqual([]);
 	});
 
+	it("BUG: mismatches results when they arrive in forward order (issue #90)", () => {
+		// Simulates the bug from https://github.com/vhallac/semblr/issues/90:
+		// When multiple tool calls are made in parallel and results arrive in forward
+		// (call) order, the position-based sequential matching (which scans backward
+		// for the last call without a result) pairs every result with the wrong call.
+		//
+		// Two calls: [0] cmd-AAA produces "output-of-aaa", [1] cmd-BBB produces "output-of-bbb"
+		// If results arrive in forward order: AAA-result first, then BBB-result,
+		// the backward scan finds [1] empty first and assigns AAA-result there, then
+		// finds [0] empty and assigns BBB-result there — everything swapped.
+		const state: MessageEndProcessingState = {
+			accumulatedText: [],
+			toolCallCount: 0,
+			toolCallNames: [],
+			toolCalls: [],
+			responseSegments: [],
+		};
+
+		// Assistant makes two parallel bash calls
+		applyMessageEndToState(
+			{
+				role: "assistant",
+				content: [
+					{ type: "toolCall", name: "bash", id: "cmd-aaa", arguments: { command: "echo aaa" } },
+					{ type: "toolCall", name: "bash", id: "cmd-bbb", arguments: { command: "echo bbb" } },
+				],
+			},
+			state,
+		);
+
+		expect(state.toolCalls).toHaveLength(2);
+		expect(state.toolCalls[0].index).toBe(0);
+		expect(state.toolCalls[1].index).toBe(1);
+
+		// Results arrive in FORWARD order (cmd-aaa first, cmd-bbb second)
+		applyMessageEndToState(
+			{ role: "toolResult", toolCallId: "cmd-aaa", content: [{ type: "text", text: "output-of-aaa" }] },
+			state,
+		);
+		applyMessageEndToState(
+			{ role: "toolResult", toolCallId: "cmd-bbb", content: [{ type: "text", text: "output-of-bbb" }] },
+			state,
+		);
+
+		// BUG: with backward sequential matching, #0 gets "output-of-bbb" and #1 gets "output-of-aaa"
+		// Instead, #0 should have "output-of-aaa" and #1 should have "output-of-bbb"
+		expect(state.toolCalls[0].result_summary).toBe("output-of-aaa");
+		expect(state.toolCalls[1].result_summary).toBe("output-of-bbb");
+	});
+
 	it("does not add duplicate tool call names", () => {
 		const state: MessageEndProcessingState = {
 			accumulatedText: [],

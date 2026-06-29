@@ -20,3 +20,4 @@ coverage/
 .direnv/
 CLAUDE.md
 
+.agent/

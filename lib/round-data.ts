@@ -13,6 +13,7 @@ export interface ResponseSegment {
 
 export interface ToolCallDetail {
 	index: number;
+	id?: string;
 	name: string;
 	arguments: string;
 	result_summary: string;

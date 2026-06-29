@@ -118,6 +118,89 @@ describe("pi session parsing", () => {
 		expect(rounds.map((round) => round.turnIndex)).toEqual([0, 1]);
 	});
 
+	it("matches tool results by toolCallId when IDs are present (parallel calls)", () => {
+		const raw = [
+			line({
+				type: "message",
+				id: "u1",
+				message: { role: "user", timestamp: 10, content: [{ type: "text", text: "Use tools" }] },
+			}),
+			line({
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "toolCall", id: "call_a", name: "alpha", arguments: { x: 1 } },
+						{ type: "toolCall", id: "call_b", name: "beta", arguments: { y: 2 } },
+					],
+				},
+			}),
+			// Results arrive in REVERSED order (beta before alpha — parallel race)
+			line({
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolCallId: "call_b",
+					toolName: "beta",
+					content: [{ type: "text", text: "result B" }],
+				},
+			}),
+			line({
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolCallId: "call_a",
+					toolName: "alpha",
+					content: [{ type: "text", text: "result A" }],
+				},
+			}),
+		].join("\n");
+
+		const [round] = parsePiSessionJsonl(raw, { now: () => 99 });
+
+		expect(round.toolCalls).toHaveLength(2);
+		expect(round.toolCalls[0]).toMatchObject({
+			id: "call_a",
+			name: "alpha",
+			result_summary: "result A",
+		});
+		expect(round.toolCalls[1]).toMatchObject({
+			id: "call_b",
+			name: "beta",
+			result_summary: "result B",
+		});
+	});
+
+	it("falls back to sequential matching when toolCallId is absent", () => {
+		const raw = [
+			line({
+				type: "message",
+				id: "u1",
+				message: { role: "user", timestamp: 10, content: [{ type: "text", text: "Use tools" }] },
+			}),
+			line({
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "toolCall", name: "first", arguments: { a: 1 } },
+						{ type: "toolCall", name: "second", arguments: { b: 2 } },
+					],
+				},
+			}),
+			line({
+				type: "message",
+				message: { role: "toolResult", toolName: "second", content: [{ type: "text", text: "result 2" }] },
+			}),
+		].join("\n");
+
+		const [round] = parsePiSessionJsonl(raw, { now: () => 99 });
+
+		expect(round.toolCalls).toHaveLength(2);
+		expect(round.toolCalls[1].result_summary).toBe("result 2");
+		expect(round.toolCalls[0].result_summary).toBe("");
+	});
+
 	it("can skip a short final response for bulk digestion", () => {
 		const raw = [
 			line({ type: "message", id: "u1", message: { role: "user", content: [{ type: "text", text: "Prompt" }] } }),
