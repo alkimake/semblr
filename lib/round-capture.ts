@@ -235,9 +235,7 @@ export function applyMessageEndToState(message: unknown, state: MessageEndProces
 			const resultText = resultContent ? extractText(resultContent) : "";
 
 			// Try ID-based match first
-			let target = state.toolCalls.find(
-				(tc) => tc.id === toolCallId && tc.result_summary === "",
-			);
+			let target = state.toolCalls.find((tc) => tc.id === toolCallId && tc.result_summary === "");
 
 			// Fallback: backward sequential scan (legacy round data without IDs)
 			if (!target) {
